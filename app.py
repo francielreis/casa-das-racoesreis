@@ -2,6 +2,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from decimal import Decimal
+from urllib.parse import urlencode
 
 from flask import (
     Flask, request, redirect, session,
@@ -36,7 +37,6 @@ app.config["SQLALCHEMY_DATABASE_URI"] = database_url
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
 db = SQLAlchemy(app)
-
 FUSO_LOJA = ZoneInfo("America/Fortaleza")
 
 
@@ -180,11 +180,13 @@ def numero(valor):
 def dinheiro(valor):
     valor = Decimal(valor or 0)
     texto = f"{valor:,.2f}"
+
     texto = (
         texto.replace(",", "X")
         .replace(".", ",")
         .replace("X", ".")
     )
+
     return f"R$ {texto}"
 
 
@@ -202,160 +204,144 @@ BASE = """
 <meta charset="UTF-8">
 <meta name="viewport"
       content="width=device-width, initial-scale=1">
-<title>Casa das Rações</title>
-
+<title>Casa das Rações Reis</title>
 <style>
-* {
-    box-sizing: border-box;
+*{box-sizing:border-box}
+body{
+    margin:0;
+    background:#f3f5f4;
+    font-family:Arial,sans-serif;
+    color:#222
 }
-body {
-    margin: 0;
-    background: #f3f5f4;
-    font-family: Arial, sans-serif;
-    color: #222;
+header{
+    background:#176b3a;
+    color:white;
+    padding:18px
 }
-header {
-    background: #176b3a;
-    color: white;
-    padding: 18px;
+header h2{margin:0}
+nav{
+    background:white;
+    padding:8px;
+    overflow-x:auto;
+    white-space:nowrap;
+    border-bottom:1px solid #ddd
 }
-header h2 {
-    margin: 0;
+nav a{
+    display:inline-block;
+    text-decoration:none;
+    color:#176b3a;
+    font-weight:bold;
+    padding:11px
 }
-nav {
-    background: white;
-    padding: 8px;
-    overflow-x: auto;
-    white-space: nowrap;
-    border-bottom: 1px solid #ddd;
+.container{
+    max-width:1100px;
+    margin:auto;
+    padding:15px
 }
-nav a {
-    display: inline-block;
-    text-decoration: none;
-    color: #176b3a;
-    font-weight: bold;
-    padding: 11px;
+.cards{
+    display:grid;
+    grid-template-columns:repeat(auto-fit,minmax(160px,1fr));
+    gap:12px
 }
-.container {
-    max-width: 1100px;
-    margin: auto;
-    padding: 15px;
+.card{
+    background:white;
+    padding:18px;
+    border-radius:10px;
+    box-shadow:0 2px 7px #00000015
 }
-.cards {
-    display: grid;
-    grid-template-columns:
-        repeat(auto-fit, minmax(160px, 1fr));
-    gap: 12px;
+.card h3{
+    font-size:14px;
+    color:#666;
+    margin-top:0
 }
-.card {
-    background: white;
-    padding: 18px;
-    border-radius: 10px;
-    box-shadow: 0 2px 7px #00000015;
+.valor{
+    color:#176b3a;
+    font-weight:bold;
+    font-size:23px
 }
-.card h3 {
-    font-size: 14px;
-    color: #666;
-    margin-top: 0;
+.formulario{
+    max-width:650px;
+    background:white;
+    padding:18px;
+    border-radius:10px
 }
-.valor {
-    color: #176b3a;
-    font-weight: bold;
-    font-size: 23px;
+input,select{
+    width:100%;
+    padding:11px;
+    margin:5px 0 13px 0;
+    border:1px solid #bbb;
+    border-radius:6px
 }
-.formulario {
-    max-width: 650px;
-    background: white;
-    padding: 18px;
-    border-radius: 10px;
+button{
+    background:#176b3a;
+    color:white;
+    padding:12px 18px;
+    border:none;
+    border-radius:7px;
+    font-weight:bold
 }
-input, select {
-    width: 100%;
-    padding: 11px;
-    margin: 5px 0 13px 0;
-    border: 1px solid #bbb;
-    border-radius: 6px;
+table{
+    width:100%;
+    background:white;
+    border-collapse:collapse
 }
-button {
-    background: #176b3a;
-    color: white;
-    padding: 12px 18px;
-    border: none;
-    border-radius: 7px;
-    font-weight: bold;
+th,td{
+    padding:10px;
+    border-bottom:1px solid #ddd;
+    text-align:left
 }
-table {
-    width: 100%;
-    background: white;
-    border-collapse: collapse;
+th{background:#e9eceb}
+.sucesso{
+    background:#d1e7dd;
+    padding:12px;
+    border-radius:6px;
+    margin-bottom:12px
 }
-th, td {
-    padding: 10px;
-    border-bottom: 1px solid #ddd;
-    text-align: left;
+.erro{
+    background:#f8d7da;
+    padding:12px;
+    border-radius:6px;
+    margin-bottom:12px
 }
-th {
-    background: #e9eceb;
-}
-.sucesso {
-    background: #d1e7dd;
-    padding: 12px;
-    border-radius: 6px;
-    margin-bottom: 12px;
-}
-.erro {
-    background: #f8d7da;
-    padding: 12px;
-    border-radius: 6px;
-    margin-bottom: 12px;
-}
-h1 {
-    color: #176b3a;
-}
-.tabela {
-    overflow-x: auto;
-}
-.aviso {
-    background: #fff3cd;
-    padding: 12px;
-    border-radius: 6px;
+h1{color:#176b3a}
+.tabela{overflow-x:auto}
+.aviso{
+    background:#fff3cd;
+    padding:12px;
+    border-radius:6px
 }
 </style>
 </head>
-
 <body>
+
 <header>
-    <h2>🌾 Casa das Rações</h2>
-    <small>
-        Estoque • Caixa • Vendas • Fiado • Lucro
-    </small>
+<h2>🌾 Casa das Rações Reis</h2>
+<small>Estoque • Caixa • Vendas • Fiado • Lucro</small>
 </header>
 
 {% if session.get("logado") %}
 <nav>
-    <a href="/">Painel</a>
-    <a href="/produtos">Produtos</a>
-    <a href="/entrada">Entrada</a>
-    <a href="/venda">Venda</a>
-    <a href="/clientes">Clientes</a>
-    <a href="/fiado">Fiado</a>
-    <a href="/caixa">Caixa</a>
-    <a href="/relatorios">Relatórios</a>
-    <a href="/logout">Sair</a>
+<a href="/">Painel</a>
+<a href="/produtos">Produtos</a>
+<a href="/entrada">Entrada</a>
+<a href="/venda">Venda</a>
+<a href="/clientes">Clientes</a>
+<a href="/fiado">Fiado</a>
+<a href="/caixa">Caixa</a>
+<a href="/relatorios">Relatórios</a>
+<a href="/catalogo">Catálogo público</a>
+<a href="/logout">Sair</a>
 </nav>
 {% endif %}
 
 <div class="container">
-    {% with mensagens =
-        get_flashed_messages(with_categories=true) %}
-        {% for categoria, mensagem in mensagens %}
-            <div class="{{ categoria }}">
-                {{ mensagem }}
-            </div>
-        {% endfor %}
-    {% endwith %}
+{% with mensagens = get_flashed_messages(with_categories=true) %}
+    {% for categoria, mensagem in mensagens %}
+        <div class="{{ categoria }}">{{ mensagem }}</div>
+    {% endfor %}
+{% endwith %}
 
-    {{ conteudo }}
+{{ conteudo }}
 </div>
 </body>
 </html>
@@ -374,7 +360,10 @@ def pagina(template, **dados):
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
-        usuario_correto = os.getenv("ADMIN_USER", "admin")
+        usuario_correto = os.getenv(
+            "ADMIN_USER", "admin"
+        )
+
         senha_correta = os.getenv(
             "ADMIN_PASSWORD", "admin123"
         )
@@ -405,13 +394,7 @@ def login():
             <button>Entrar</button>
         </form>
 
-        <br>
-
-        <div class="aviso">
-            Usuário inicial: <b>admin</b>
-            <br>
-            Senha inicial: <b>admin123</b>
-        </div>
+        <p><a href="/catalogo">Ver catálogo da loja</a></p>
     </div>
     """)
 
@@ -425,7 +408,7 @@ def logout():
 @app.route("/")
 def painel():
     if not logado():
-        return redirect("/login")
+        return catalogo_publico()
 
     vendas = Venda.query.all()
 
@@ -508,7 +491,6 @@ def painel():
     </div>
 
     <h2>Estoque baixo</h2>
-
     <div class="tabela">
         <table>
             <tr>
@@ -529,7 +511,6 @@ def painel():
     </div>
 
     <h2>Últimas vendas</h2>
-
     <div class="tabela">
         <table>
             <tr>
@@ -591,7 +572,6 @@ def produtos():
 
     lista = Produto.query.order_by(Produto.nome).all()
     vendas = Venda.query.all()
-
     lucros_por_produto = {}
 
     for venda in vendas:
@@ -645,7 +625,6 @@ def produtos():
     </div>
 
     <h2>Mercadorias</h2>
-
     <div class="tabela">
         <table>
             <tr>
@@ -816,7 +795,6 @@ def clientes():
     </div>
 
     <h2>Clientes cadastrados</h2>
-
     <div class="tabela">
         <table>
             <tr>
@@ -1028,7 +1006,6 @@ def venda():
             </select>
 
             <h2>Cadastrar cliente nesta venda</h2>
-
             <p>
                 Para um novo cliente, deixe a seleção
                 acima em “Nenhum”.
@@ -1049,9 +1026,7 @@ def venda():
                    name="novo_cliente_telefone"
                    type="tel" maxlength="50">
 
-            <label>
-                Valor pago agora em venda fiado
-            </label>
+            <label>Valor pago agora em venda fiado</label>
             <input name="entrada" type="number"
                    step="0.01" value="0">
 
@@ -1248,7 +1223,6 @@ def caixa():
     </div>
 
     <h2>Movimentações</h2>
-
     <div class="tabela">
         <table>
             <tr>
@@ -1471,7 +1445,6 @@ def relatorios():
     </p>
 
     <h2>Vendas</h2>
-
     <div class="tabela">
         <table>
             <tr>
@@ -1513,7 +1486,6 @@ def relatorios():
     </div>
 
     <h2>Movimentações de caixa</h2>
-
     <div class="tabela">
         <table>
             <tr>
@@ -1558,6 +1530,437 @@ def relatorios():
     )
 
 
+PRODUTOS_CATALOGO = [
+    ("Soja", "Grãos e farelos", "🌱"),
+    ("Milho", "Grãos e farelos", "🌽"),
+    ("Xerém de milho", "Grãos e farelos", "🌽"),
+    ("Feijão branco", "Grãos e farelos", "🫘"),
+    ("Feijão vermelho", "Grãos e farelos", "🫘"),
+    ("Farelo de trigo", "Grãos e farelos", "🌾"),
+    ("Torta de algodão", "Grãos e farelos", "🌿"),
+    ("Cuim de arroz", "Grãos e farelos", "🌾"),
+    ("Ração de postura", "Aves", "🐔"),
+    ("Ração inicial para galinhas", "Aves", "🐣"),
+    ("Ração de crescimento para suínos", "Suínos", "🐷"),
+    ("Ração de terminação para suínos", "Suínos", "🐷"),
+    ("Núcleo para suínos", "Suínos", "🐷"),
+    ("Núcleo para bovinos", "Bovinos", "🐮"),
+    ("Ração para cães", "Cães e gatos", "🐶"),
+    ("Ração para gatos", "Cães e gatos", "🐱"),
+    ("Ração para peixes", "Peixes", "🐟"),
+]
+
+
+def link_whatsapp(produto=None):
+    if produto:
+        mensagem = (
+            "Olá! Gostaria de consultar preço, embalagem "
+            "e disponibilidade de "
+            + produto
+            + " na Casa das Rações Reis."
+        )
+    else:
+        mensagem = (
+            "Olá! Gostaria de informações sobre os produtos "
+            "da Casa das Rações Reis."
+        )
+
+    return (
+        "https://wa.me/5589981273202?"
+        + urlencode({"text": mensagem})
+    )
+
+
+CATALOGO_HTML = """
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport"
+      content="width=device-width, initial-scale=1">
+<title>Catálogo | Casa das Rações Reis</title>
+<meta name="description"
+      content="Catálogo da Casa das Rações Reis em Campo Grande do Piauí. Rações, grãos, farelos e núcleos. Consulte pelo WhatsApp.">
+
+<style>
+*{box-sizing:border-box}
+body{
+    margin:0;
+    font-family:Arial,sans-serif;
+    background:#f5f6ef;
+    color:#19382b
+}
+a{color:inherit}
+.topo{
+    background:#103d26;
+    color:white;
+    padding:20px
+}
+.limite{
+    max-width:1100px;
+    margin:auto
+}
+.barra{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:12px;
+    flex-wrap:wrap
+}
+.marca{
+    font-size:20px;
+    font-weight:bold;
+    text-decoration:none
+}
+.interno{
+    font-size:14px;
+    text-decoration:none;
+    border:1px solid #ffffff66;
+    border-radius:8px;
+    padding:10px 14px
+}
+.hero{
+    background:linear-gradient(135deg,#103d26,#20623d);
+    color:white;
+    padding:44px 20px
+}
+.hero h1{
+    font-size:clamp(30px,6vw,54px);
+    margin:12px 0;
+    max-width:720px
+}
+.hero p{
+    font-size:18px;
+    line-height:1.6;
+    max-width:650px
+}
+.selo{
+    color:#ffe08a;
+    font-weight:bold
+}
+.botao{
+    display:inline-block;
+    background:#ffcf45;
+    color:#19382b;
+    padding:14px 20px;
+    border-radius:10px;
+    text-decoration:none;
+    font-weight:bold
+}
+main{padding:28px 20px}
+.contatos{
+    display:grid;
+    grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+    gap:15px;
+    margin-bottom:35px
+}
+.contato,.produto{
+    background:white;
+    border:1px solid #e0e6dc;
+    border-radius:15px;
+    padding:22px
+}
+.contato h2{
+    font-size:16px;
+    margin:0 0 12px
+}
+.contato p{
+    line-height:1.6;
+    margin:0
+}
+.busca{
+    display:flex;
+    gap:12px;
+    flex-wrap:wrap;
+    background:white;
+    padding:18px;
+    border-radius:12px;
+    margin:20px 0
+}
+.busca label{
+    display:block;
+    font-size:14px;
+    margin-bottom:6px
+}
+.busca div{
+    flex:1;
+    min-width:180px
+}
+input,select,button{
+    font:inherit;
+    border-radius:8px;
+    padding:12px;
+    border:1px solid #b9cbbd
+}
+input,select{width:100%}
+button{
+    background:#176b3a;
+    color:white;
+    cursor:pointer;
+    align-self:end
+}
+.grade{
+    display:grid;
+    grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+    gap:16px
+}
+.icone{
+    font-size:42px;
+    margin-bottom:14px
+}
+.categoria{
+    font-size:13px;
+    color:#55705c
+}
+.produto h3{
+    font-size:20px;
+    margin:10px 0;
+    line-height:1.3
+}
+.produto p{
+    color:#55705c;
+    font-size:14px;
+    line-height:1.6
+}
+.produto .botao{
+    background:#176b3a;
+    color:white;
+    width:100%;
+    text-align:center;
+    font-size:14px
+}
+.banner{margin-top:35px}
+.banner img{
+    display:block;
+    width:100%;
+    max-width:650px;
+    height:auto;
+    margin:auto;
+    border-radius:15px
+}
+footer{
+    background:#103d26;
+    color:white;
+    padding:25px 20px;
+    line-height:1.7;
+    margin-top:30px
+}
+.vazio{
+    padding:25px;
+    background:white;
+    border-radius:12px
+}
+</style>
+</head>
+
+<body>
+<header class="topo">
+    <div class="limite barra">
+        <a class="marca" href="/catalogo">
+            🌾 Casa das Rações Reis
+        </a>
+        <a class="interno"
+           href="{{ '/' if session.get('logado') else '/login' }}">
+            Área da loja
+        </a>
+    </div>
+</header>
+
+<section class="hero">
+    <div class="limite">
+        <div class="selo">
+            CAMPO GRANDE DO PIAUÍ • PI
+        </div>
+        <h1>
+            Qualidade e compromisso com o homem do campo
+        </h1>
+        <p>
+            Conheça nossas rações, grãos, farelos e núcleos.
+            Fale com a loja para consultar preços
+            e disponibilidade.
+        </p>
+        <a class="botao" href="{{ whatsapp }}"
+           target="_blank" rel="noopener noreferrer">
+            Falar pelo WhatsApp
+        </a>
+    </div>
+</section>
+
+<main class="limite">
+    <section class="contatos"
+             aria-label="Contato e atendimento">
+        <div class="contato">
+            <h2>📱 WhatsApp</h2>
+            <p>
+                <a href="{{ whatsapp }}" target="_blank"
+                   rel="noopener noreferrer">
+                    (89) 98127-3202
+                </a>
+            </p>
+        </div>
+
+        <div class="contato">
+            <h2>📍 Endereço</h2>
+            <p>
+                Rua Pedro Carvalho Gomes, nº 73<br>
+                Campo Grande do Piauí – PI
+            </p>
+            <a href="{{ mapa }}" target="_blank"
+               rel="noopener noreferrer">
+                Ver endereço no mapa
+            </a>
+        </div>
+
+        <div class="contato">
+            <h2>🕒 Atendimento</h2>
+            <p>
+                Das 07h às 17h<br>
+                Consulte os dias de funcionamento
+                pelo WhatsApp.
+            </p>
+        </div>
+    </section>
+
+    <h2>Nosso catálogo</h2>
+    <p>
+        Consulte preços, tamanhos das embalagens
+        e disponibilidade com a loja.
+    </p>
+
+    <form class="busca" method="get" action="/catalogo">
+        <div>
+            <label for="q">Buscar produto</label>
+            <input id="q" name="q" value="{{ busca }}"
+                   placeholder="Ex.: milho, postura, suínos"
+                   maxlength="150">
+        </div>
+
+        <div>
+            <label for="categoria">Categoria</label>
+            <select id="categoria" name="categoria">
+                <option value="">Todas as categorias</option>
+                {% for categoria in categorias %}
+                <option value="{{ categoria }}"
+                        {% if filtro == categoria %}selected{% endif %}>
+                    {{ categoria }}
+                </option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <button type="submit">Buscar</button>
+    </form>
+
+    <div class="grade">
+        {% for produto in produtos %}
+        <article class="produto">
+            <div class="icone" aria-hidden="true">
+                {{ produto.icone }}
+            </div>
+            <span class="categoria">
+                {{ produto.categoria }}
+            </span>
+            <h3>{{ produto.nome }}</h3>
+            <p>Preço e embalagem sob consulta.</p>
+
+            <a class="botao" href="{{ produto.whatsapp }}"
+               target="_blank" rel="noopener noreferrer">
+                Consultar pelo WhatsApp
+            </a>
+        </article>
+        {% else %}
+        <p class="vazio">
+            Nenhum produto encontrado.
+            <a href="/catalogo">Ver todo o catálogo</a>
+        </p>
+        {% endfor %}
+    </div>
+
+    {% if tem_banner %}
+    <section class="banner"
+             aria-label="Apresentação da loja">
+        <h2>Casa das Rações Reis</h2>
+        <img src="{{ url_for('static', filename='catalogo-loja.png') }}"
+             alt="Apresentação da Casa das Rações Reis e suas linhas de produtos"
+             loading="lazy">
+    </section>
+    {% endif %}
+</main>
+
+<footer>
+    <div class="limite">
+        <strong>Casa das Rações Reis</strong><br>
+        Rua Pedro Carvalho Gomes, nº 73 —
+        Campo Grande do Piauí – PI<br>
+        WhatsApp: (89) 98127-3202 •
+        Atendimento das 07h às 17h
+    </div>
+</footer>
+</body>
+</html>
+"""
+
+
+@app.route("/catalogo")
+def catalogo_publico():
+    busca = request.args.get("q", "").strip()[:150]
+    filtro = request.args.get("categoria", "")
+
+    categorias = sorted({
+        p[1] for p in PRODUTOS_CATALOGO
+    })
+
+    produtos = [
+        {
+            "nome": nome,
+            "categoria": categoria,
+            "icone": icone,
+            "whatsapp": link_whatsapp(nome)
+        }
+        for nome, categoria, icone in PRODUTOS_CATALOGO
+        if (
+            not busca
+            or busca.casefold() in nome.casefold()
+        )
+        and (
+            not filtro
+            or categoria == filtro
+        )
+    ]
+
+    mapa = (
+        "https://www.google.com/maps/search/?"
+        + urlencode({
+            "api": "1",
+            "query": (
+                "Rua Pedro Carvalho Gomes, 73, "
+                "Campo Grande do Piauí, PI"
+            )
+        })
+    )
+
+    tem_banner = bool(
+        app.static_folder
+        and os.path.isfile(
+            os.path.join(
+                app.static_folder,
+                "catalogo-loja.png"
+            )
+        )
+    )
+
+    return render_template_string(
+        CATALOGO_HTML,
+        produtos=produtos,
+        categorias=categorias,
+        busca=busca,
+        filtro=filtro,
+        whatsapp=link_whatsapp(),
+        mapa=mapa,
+        tem_banner=tem_banner
+    )
+
+
 with app.app_context():
     db.create_all()
 
@@ -1568,4 +1971,4 @@ if __name__ == "__main__":
     app.run(
         host="0.0.0.0",
         port=porta
-    )
+)

@@ -136,6 +136,27 @@ class Caixa(db.Model):
     data = db.Column(db.DateTime, default=agora_utc)
 
 
+class FechamentoCaixa(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    ultima_venda_id = db.Column(db.Integer, nullable=False, default=0)
+    ultimo_movimento_id = db.Column(db.Integer, nullable=False, default=0)
+    data = db.Column(db.DateTime, nullable=False, default=agora_utc)
+
+
+def vendas_atuais():
+    limite = db.session.query(
+        db.func.max(FechamentoCaixa.ultima_venda_id)
+    ).scalar() or 0
+    return Venda.query.filter(Venda.id > limite)
+
+
+def movimentos_atuais():
+    limite = db.session.query(
+        db.func.max(FechamentoCaixa.ultimo_movimento_id)
+    ).scalar() or 0
+    return Caixa.query.filter(Caixa.id > limite)
+
+
 class BannerLoja(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     imagem = db.Column(db.LargeBinary, nullable=False)
@@ -337,7 +358,7 @@ def painel():
     if not logado():
         return catalogo_publico()
 
-    vendas = Venda.query.all()
+    vendas = vendas_atuais().all()
     total_vendido = sum(
         (Decimal(v.total or 0) for v in vendas),
         Decimal("0")
@@ -347,11 +368,11 @@ def painel():
         Decimal("0")
     )
     fiado = sum(
-        (v.saldo_devedor for v in vendas if v.tipo == "fiado"),
+        (v.saldo_devedor for v in Venda.query.filter_by(tipo="fiado").all()),
         Decimal("0")
     )
 
-    movimentos = Caixa.query.all()
+    movimentos = movimentos_atuais().all()
     entradas = sum(
         (Decimal(m.valor) for m in movimentos if m.tipo == "entrada"),
         Decimal("0")
@@ -365,10 +386,12 @@ def painel():
     baixos = Produto.query.filter(
         Produto.estoque <= Produto.estoque_minimo
     ).all()
-    ultimas = Venda.query.order_by(Venda.id.desc()).limit(10).all()
+    ultimas = vendas_atuais().order_by(Venda.id.desc()).limit(10).all()
 
     return pagina("""
 <h1>Painel</h1>
+<p>Caixa, vendas e lucro desde o último zeramento.
+<a href="/zerar-caixa">Zerar caixa e vendas</a></p>
 <div class="cards">
 <div class="card">
 <h3>💵 Dinheiro em caixa</h3>
@@ -448,7 +471,7 @@ def produtos():
         return redirect("/produtos")
 
     lista = Produto.query.order_by(Produto.nome).all()
-    vendas = Venda.query.all()
+    vendas = vendas_atuais().all()
     lucros_por_produto = {}
 
     for venda in vendas:
@@ -492,7 +515,7 @@ def produtos():
 <th>Venda</th>
 <th>Lucro por unidade</th>
 <th>Margem</th>
-<th>Lucro acumulado</th>
+<th>Lucro desde o último zeramento</th>
 <th>Estoque</th>
 </tr>
 {% for produto in produtos %}
@@ -910,7 +933,7 @@ def caixa():
         flash("Movimentação registrada.", "sucesso")
         return redirect("/caixa")
 
-    todos_movimentos = Caixa.query.all()
+    todos_movimentos = movimentos_atuais().all()
     entradas = sum(
         (
             Decimal(m.valor)
@@ -928,12 +951,14 @@ def caixa():
         Decimal("0")
     )
     saldo = entradas - saidas
-    movimentos = Caixa.query.order_by(
+    movimentos = movimentos_atuais().order_by(
         Caixa.id.desc()
     ).limit(100).all()
 
     return pagina("""
 <h1>Caixa</h1>
+<p>Valores desde o último zeramento.
+<a href="/zerar-caixa">Zerar caixa e vendas</a></p>
 <div class="cards">
 <div class="card">
 <h3>Saldo atual</h3>
@@ -987,6 +1012,60 @@ def caixa():
         entradas=entradas,
         saidas=saidas
     )
+
+
+@app.route("/zerar-caixa", methods=["GET", "POST"])
+def zerar_caixa():
+    if not logado():
+        return redirect("/login")
+
+    if request.method == "POST":
+        recebido = request.form.get("csrf_zerar", "")
+        esperado = session.get("csrf_zerar", "")
+        if not esperado or not hmac.compare_digest(recebido, esperado):
+            flash("A sessão do formulário expirou. Tente novamente.", "erro")
+            return redirect("/zerar-caixa")
+        if request.form.get("confirmar") != "sim":
+            flash("Confirme para iniciar uma nova contagem.", "erro")
+            return redirect("/zerar-caixa")
+
+        # Uma única consulta fixa os limites das duas tabelas.
+        # Novos registros acima desses IDs pertencem à próxima contagem.
+        venda_id, movimento_id = db.session.query(
+            db.session.query(db.func.max(Venda.id)).scalar_subquery(),
+            db.session.query(db.func.max(Caixa.id)).scalar_subquery()
+        ).one()
+        db.session.add(FechamentoCaixa(
+            ultima_venda_id=venda_id or 0,
+            ultimo_movimento_id=movimento_id or 0
+        ))
+        db.session.commit()
+        session.pop("csrf_zerar", None)
+        flash(
+            "Caixa e vendas zerados. O histórico continua nos relatórios.",
+            "sucesso"
+        )
+        return redirect("/caixa")
+
+    if "csrf_zerar" not in session:
+        session["csrf_zerar"] = secrets.token_urlsafe(32)
+    return pagina("""
+<h1>Zerar caixa e vendas</h1>
+<div class="formulario">
+<p>O saldo, as entradas, as saídas, o total vendido, o lucro e a lista de
+últimas vendas começarão uma nova contagem.</p>
+<p>O histórico continuará nos <a href="/relatorios">relatórios</a>.
+O estoque e os fiados a receber serão mantidos.</p>
+<form method="post">
+<input type="hidden" name="csrf_zerar" value="{{ token }}">
+<label><input style="width:auto" type="checkbox" name="confirmar"
+value="sim" required> Confirmo que desejo iniciar uma nova contagem.</label>
+<br><br>
+<button type="submit">Zerar caixa e vendas</button>
+<a href="/caixa">Cancelar</a>
+</form>
+</div>
+""", token=session["csrf_zerar"])
 
 
 @app.route("/relatorios")
@@ -1985,4 +2064,4 @@ if __name__ == "__main__":
     app.run(
         host="0.0.0.0",
         port=porta
-)
+    )

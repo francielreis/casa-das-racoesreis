@@ -3,7 +3,7 @@ import secrets
 import hmac
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from urllib.parse import urlencode
 
 from flask import (
@@ -517,6 +517,7 @@ def produtos():
 <th>Margem</th>
 <th>Lucro desde o último zeramento</th>
 <th>Estoque</th>
+<th>Ações</th>
 </tr>
 {% for produto in produtos %}
 <tr>
@@ -527,11 +528,68 @@ def produtos():
 <td>{{ "%.2f"|format(produto.margem) }}%</td>
 <td>{{ lucros.get(produto.id, 0)|dinheiro }}</td>
 <td>{{ produto.estoque }} {{ produto.unidade }}</td>
+<td><a href="{{ url_for('alterar_preco', produto_id=produto.id) }}">Alterar preço</a></td>
 </tr>
 {% endfor %}
 </table>
 </div>
 """, produtos=lista, lucros=lucros_por_produto)
+
+
+@app.route("/produtos/<int:produto_id>/preco", methods=["GET", "POST"])
+def alterar_preco(produto_id):
+    if not logado():
+        return redirect("/login")
+
+    produto = db.get_or_404(Produto, produto_id)
+    if "csrf_precos" not in session:
+        session["csrf_precos"] = secrets.token_urlsafe(32)
+
+    custo_texto = str(produto.custo)
+    preco_texto = str(produto.preco)
+
+    if request.method == "POST":
+        recebido = request.form.get("csrf_precos", "")
+        if not hmac.compare_digest(recebido, session["csrf_precos"]):
+            flash("A sessão do formulário expirou. Tente novamente.", "erro")
+            return redirect(request.path)
+
+        custo_texto = request.form.get("custo", "").strip()
+        preco_texto = request.form.get("preco", "").strip()
+        try:
+            valores = []
+            for texto in (custo_texto, preco_texto):
+                valor = Decimal(texto.replace(",", "."))
+                if not valor.is_finite() or not 0 <= valor <= Decimal("9999999999.99"):
+                    raise ValueError()
+                if valor != valor.quantize(Decimal("0.01")):
+                    raise ValueError()
+                valores.append(valor)
+        except (InvalidOperation, ValueError):
+            flash("Informe preços válidos, sem valores negativos e com até duas casas decimais.", "erro")
+        else:
+            produto.custo, produto.preco = valores
+            db.session.commit()
+            flash("Preços atualizados com sucesso.", "sucesso")
+            return redirect("/produtos")
+
+    return pagina("""
+<div class="formulario">
+<h1>Alterar preço</h1>
+<h2>{{ produto.nome }}</h2>
+<p>Valores por {{ produto.unidade }}. Os novos preços serão usados nas próximas vendas.</p>
+<form method="post">
+<input type="hidden" name="csrf_precos" value="{{ token }}">
+<label for="custo">Preço de compra (R$)</label>
+<input id="custo" name="custo" inputmode="decimal" value="{{ custo }}" required>
+<label for="preco">Preço de venda (R$)</label>
+<input id="preco" name="preco" inputmode="decimal" value="{{ preco }}" required>
+<button type="submit">Salvar preços</button>
+<a href="/produtos" style="display:inline-block;padding:12px">Cancelar</a>
+</form>
+</div>
+""", produto=produto, custo=custo_texto, preco=preco_texto,
+        token=session["csrf_precos"])
 
 
 @app.route("/entrada", methods=["GET", "POST"])

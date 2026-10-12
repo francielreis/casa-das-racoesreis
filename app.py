@@ -8,7 +8,7 @@ from urllib.parse import urlencode
 
 from flask import (
     Flask, request, redirect, session, flash,
-    render_template_string, Response
+    render_template_string, Response, send_from_directory
 )
 from flask_sqlalchemy import SQLAlchemy
 from markupsafe import Markup
@@ -1909,6 +1909,14 @@ def imagem_banner(banner_id):
     return resposta
 
 
+@app.route("/banner-fixo/<int:indice>")
+def banner_fixo(indice):
+    arquivos = {1: "banner-produtos.png", 2: "banner-fachada.png"}
+    if indice not in arquivos:
+        return "Banner não encontrado", 404
+    return send_from_directory(app.root_path, arquivos[indice])
+
+
 @app.context_processor
 def banners_do_catalogo():
     if (
@@ -1934,7 +1942,7 @@ def banners_do_catalogo():
 
 
 CARROSSEL_HTML = """
-{% set total_banners = banners_publicos|length if banners_publicos else 3 %}
+{% set total_banners = banners_publicos|length if banners_publicos else 2 %}
 <style>
 .carrossel-loja{
     background:#103d26;
@@ -2016,25 +2024,17 @@ CARROSSEL_HTML = """
 </figure>
 {% endfor %}
 {% else %}
-{% for selo, titulo, texto, icone in [
-    ('CASA DAS RAÇÕES REIS', 'Nutrição para cada criação',
-     'Rações para aves, suínos, bovinos e peixes. Cuidado também para cães e gatos.', '🐮'),
-    ('GRÃOS, FARELOS E NÚCLEOS', 'Tudo para o homem do campo',
-     'Milho, soja, xerém, farelo de trigo e torta de algodão. Consulte a disponibilidade.', '🌾'),
-    ('CAMPO GRANDE DO PIAUÍ • PI', 'Fale com a nossa loja',
-     'Rua Pedro Carvalho Gomes, nº 73. Atendimento das 07h às 17h. Consulte preços pelo WhatsApp.', '📱')
+{% for indice, slogan in [
+    (1, 'Casa das Rações Reis — produtos para todas as criações'),
+    (2, 'Casa das Rações Reis — a parceira do produtor rural em Campo Grande do Piauí')
 ] %}
 <figure class="banner-slide" {% if not loop.first %}hidden{% endif %}
-        aria-label="{{ loop.index }} de 3">
-<div class="banner-campanha">
-<div>
-<div class="selo">{{ selo }}</div>
-<h2>{{ titulo }}</h2>
-<p>{{ texto }}</p>
-<a class="botao" href="{{ whatsapp }}" target="_blank" rel="noopener noreferrer">Consultar pelo WhatsApp</a>
-</div>
-<div class="banner-ilustracao" aria-hidden="true">{{ icone }}</div>
-</div>
+        aria-label="{{ loop.index }} de 2">
+<a href="{{ whatsapp }}" target="_blank" rel="noopener noreferrer">
+<img src="{{ url_for('banner_fixo', indice=indice) }}" alt="{{ slogan }}"
+     {% if not loop.first %}loading="lazy"{% endif %}>
+</a>
+<figcaption>{{ slogan }}</figcaption>
 </figure>
 {% endfor %}
 {% endif %}

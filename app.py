@@ -1934,7 +1934,7 @@ def banners_do_catalogo():
 
 
 CARROSSEL_HTML = """
-{% if banners_publicos %}
+{% set total_banners = banners_publicos|length if banners_publicos else 3 %}
 <style>
 .carrossel-loja{
     background:#103d26;
@@ -1943,7 +1943,29 @@ CARROSSEL_HTML = """
 }
 .carrossel-loja .limite{position:relative}
 .banner-slide[hidden]{display:none}
-.banner-slide{margin:0}
+.banner-slide{margin:0;animation:entrada-banner .55s ease-out}
+@keyframes entrada-banner{
+    from{opacity:0;transform:translateY(12px)}
+    to{opacity:1;transform:translateY(0)}
+}
+.banner-campanha{
+    display:flex;align-items:center;justify-content:space-between;
+    gap:24px;min-height:280px;padding:36px;
+    border:1px solid #ffffff25;border-radius:18px;
+    background:radial-gradient(circle at 90% 20%,#ffcf4525,transparent 45%),
+               linear-gradient(120deg,#092719,#21613b)
+}
+.banner-campanha h2{font-size:clamp(27px,5vw,46px);margin:12px 0;max-width:650px}
+.banner-campanha p{font-size:18px;line-height:1.6;max-width:600px;margin:0 0 20px}
+.banner-ilustracao{font-size:clamp(70px,12vw,130px);flex-shrink:0}
+.banner-controles{margin-top:16px}
+@media(max-width:600px){
+    .banner-campanha{padding:24px;min-height:320px;position:relative}
+    .banner-ilustracao{position:absolute;right:15px;top:15px;font-size:42px;opacity:.7}
+    .banner-campanha .selo{padding-right:48px;font-size:13px}
+    .banner-campanha h2{padding-right:16px}
+}
+@media(prefers-reduced-motion:reduce){.banner-slide{animation:none}}
 .banner-slide img{
     display:block;
     width:100%;
@@ -1982,6 +2004,7 @@ CARROSSEL_HTML = """
          id="carrossel-loja">
 <div class="limite">
 
+{% if banners_publicos %}
 {% for banner in banners_publicos %}
 <figure class="banner-slide"
         {% if not loop.first %}hidden{% endif %}
@@ -1992,13 +2015,36 @@ CARROSSEL_HTML = """
 <figcaption>{{ banner.slogan }}</figcaption>
 </figure>
 {% endfor %}
+{% else %}
+{% for selo, titulo, texto, icone in [
+    ('CASA DAS RAÇÕES REIS', 'Nutrição para cada criação',
+     'Rações para aves, suínos, bovinos e peixes. Cuidado também para cães e gatos.', '🐮'),
+    ('GRÃOS, FARELOS E NÚCLEOS', 'Tudo para o homem do campo',
+     'Milho, soja, xerém, farelo de trigo e torta de algodão. Consulte a disponibilidade.', '🌾'),
+    ('CAMPO GRANDE DO PIAUÍ • PI', 'Fale com a nossa loja',
+     'Rua Pedro Carvalho Gomes, nº 73. Atendimento das 07h às 17h. Consulte preços pelo WhatsApp.', '📱')
+] %}
+<figure class="banner-slide" {% if not loop.first %}hidden{% endif %}
+        aria-label="{{ loop.index }} de 3">
+<div class="banner-campanha">
+<div>
+<div class="selo">{{ selo }}</div>
+<h2>{{ titulo }}</h2>
+<p>{{ texto }}</p>
+<a class="botao" href="{{ whatsapp }}" target="_blank" rel="noopener noreferrer">Consultar pelo WhatsApp</a>
+</div>
+<div class="banner-ilustracao" aria-hidden="true">{{ icone }}</div>
+</div>
+</figure>
+{% endfor %}
+{% endif %}
 
-{% if banners_publicos|length > 1 %}
+{% if total_banners > 1 %}
 <div class="banner-controles">
 <button type="button" id="banner-anterior" aria-label="Banner anterior">
 ← Anterior
 </button>
-<span id="banner-contador">1 / {{ banners_publicos|length }}</span>
+<span id="banner-contador">1 / {{ total_banners }}</span>
 <button type="button" id="banner-proximo" aria-label="Próximo banner">
 Próximo →
 </button>
@@ -2103,7 +2149,6 @@ Pausar
     reiniciar();
 })();
 </script>
-{% endif %}
 """
 
 CATALOGO_HTML = CATALOGO_HTML.replace(

@@ -1133,41 +1133,44 @@ def relatorios():
 
     periodo = request.args.get("periodo", "diario")
 
-    if periodo not in ("diario", "semanal", "mensal"):
+    if periodo not in ("diario", "semanal", "mensal", "personalizado"):
         flash("Período inválido.", "erro")
         return redirect("/relatorios")
 
+    hoje = datetime.now(FUSO_LOJA).strftime("%Y-%m-%d")
+    data_inicio = request.args.get("data_inicio", hoje)
+    data_fim = request.args.get("data_fim", hoje)
     try:
-        referencia = datetime.strptime(
-            request.args.get(
-                "data",
-                datetime.now(FUSO_LOJA).strftime("%Y-%m-%d")
-            ),
-            "%Y-%m-%d"
-        ).replace(tzinfo=FUSO_LOJA)
-    except ValueError:
-        flash("Data inválida.", "erro")
-        return redirect("/relatorios")
+        def ler_data(valor):
+            return datetime.strptime(valor, "%Y-%m-%d").replace(
+                tzinfo=FUSO_LOJA
+            )
 
-    if periodo == "semanal":
-        inicio_local = referencia - timedelta(
-            days=referencia.weekday()
-        )
-        fim_local = inicio_local + timedelta(days=7)
-    elif periodo == "mensal":
-        inicio_local = referencia.replace(day=1)
-        if inicio_local.month == 12:
-            fim_local = inicio_local.replace(
-                year=inicio_local.year + 1,
-                month=1
-            )
+        if periodo == "personalizado":
+            inicio_local = ler_data(data_inicio)
+            ultimo_dia = ler_data(data_fim)
+            if ultimo_dia < inicio_local:
+                flash("A data final deve ser igual ou posterior à data inicial.", "erro")
+                return redirect("/relatorios")
+            fim_local = ultimo_dia + timedelta(days=1)
+            referencia = inicio_local
         else:
-            fim_local = inicio_local.replace(
-                month=inicio_local.month + 1
-            )
-    else:
-        inicio_local = referencia
-        fim_local = inicio_local + timedelta(days=1)
+            referencia = ler_data(request.args.get("data", hoje))
+            if periodo == "semanal":
+                inicio_local = referencia - timedelta(days=referencia.weekday())
+                fim_local = inicio_local + timedelta(days=7)
+            elif periodo == "mensal":
+                inicio_local = referencia.replace(day=1)
+                if inicio_local.month == 12:
+                    fim_local = inicio_local.replace(year=inicio_local.year + 1, month=1)
+                else:
+                    fim_local = inicio_local.replace(month=inicio_local.month + 1)
+            else:
+                inicio_local = referencia
+                fim_local = inicio_local + timedelta(days=1)
+    except (ValueError, OverflowError):
+        flash("Informe datas válidas para o relatório.", "erro")
+        return redirect("/relatorios")
 
     inicio = inicio_local.astimezone(
         timezone.utc
@@ -1210,7 +1213,8 @@ def relatorios():
 {% for valor, titulo in [
     ("diario", "Diário"),
     ("semanal", "Semanal"),
-    ("mensal", "Mensal")
+    ("mensal", "Mensal"),
+    ("personalizado", "Personalizado")
 ] %}
 <option value="{{ valor }}"
         {% if periodo == valor %}selected{% endif %}>
@@ -1219,11 +1223,40 @@ def relatorios():
 {% endfor %}
 </select>
 
+<div id="filtro-referencia" {% if periodo == 'personalizado' %}hidden{% endif %}>
 <label for="data">Data de referência</label>
-<input id="data" name="data" type="date"
-       value="{{ referencia }}" required>
+<input id="data" name="data" type="date" value="{{ referencia }}"
+       {% if periodo != 'personalizado' %}required{% endif %}>
+</div>
+<div id="filtro-personalizado" {% if periodo != 'personalizado' %}hidden{% endif %}>
+<label for="data_inicio">Data inicial</label>
+<input id="data_inicio" name="data_inicio" type="date" value="{{ data_inicio }}"
+       {% if periodo == 'personalizado' %}required{% endif %}>
+<label for="data_fim">Data final</label>
+<input id="data_fim" name="data_fim" type="date" value="{{ data_fim }}"
+       {% if periodo == 'personalizado' %}required{% endif %}>
+<p>Inclui todos os lançamentos dos dois dias, mesmo após zerar o caixa.</p>
+</div>
 <button>Consultar relatório</button>
 </form>
+<script>
+(function () {
+    const periodo = document.getElementById("periodo");
+    const inicio = document.getElementById("data_inicio");
+    const fim = document.getElementById("data_fim");
+    function atualizar() {
+        const personalizado = periodo.value === "personalizado";
+        document.getElementById("filtro-referencia").hidden = personalizado;
+        document.getElementById("filtro-personalizado").hidden = !personalizado;
+        document.getElementById("data").required = !personalizado;
+        inicio.required = fim.required = personalizado;
+        fim.min = inicio.value;
+    }
+    periodo.addEventListener("change", atualizar);
+    inicio.addEventListener("change", atualizar);
+    atualizar();
+})();
+</script>
 
 <p>
 {{ inicio_local.strftime("%d/%m/%Y") }}
@@ -1313,6 +1346,8 @@ Movimentação líquida não é o saldo acumulado do caixa.
 """,
         periodo=periodo,
         referencia=referencia.strftime("%Y-%m-%d"),
+        data_inicio=data_inicio,
+        data_fim=data_fim,
         inicio_local=inicio_local,
         ultimo_dia=fim_local - timedelta(days=1),
         vendas=vendas,

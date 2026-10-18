@@ -136,6 +136,15 @@ class Caixa(db.Model):
     data = db.Column(db.DateTime, default=agora_utc)
 
 
+class ExclusaoVenda(db.Model):
+    venda_id = db.Column(db.Integer, db.ForeignKey("venda.id"), primary_key=True)
+    data = db.Column(db.DateTime, nullable=False, default=agora_utc)
+
+
+def vendas_validas():
+    return Venda.query.filter(~db.exists().where(ExclusaoVenda.venda_id == Venda.id))
+
+
 class FechamentoCaixa(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     ultima_venda_id = db.Column(db.Integer, nullable=False, default=0)
@@ -147,7 +156,7 @@ def vendas_atuais():
     limite = db.session.query(
         db.func.max(FechamentoCaixa.ultima_venda_id)
     ).scalar() or 0
-    return Venda.query.filter(Venda.id > limite)
+    return vendas_validas().filter(Venda.id > limite)
 
 
 def movimentos_atuais():
@@ -286,6 +295,7 @@ h1{color:#176b3a}
 <a href="/produtos">Produtos</a>
 <a href="/entrada">Entrada</a>
 <a href="/venda">Venda</a>
+<a href="/vendas">Vendas / Excluir</a>
 <a href="/clientes">Clientes</a>
 <a href="/fiado">Fiado</a>
 <a href="/caixa">Caixa</a>
@@ -368,7 +378,7 @@ def painel():
         Decimal("0")
     )
     fiado = sum(
-        (v.saldo_devedor for v in Venda.query.filter_by(tipo="fiado").all()),
+        (v.saldo_devedor for v in vendas_validas().filter_by(tipo="fiado").all()),
         Decimal("0")
     )
 
@@ -893,12 +903,111 @@ O cadastro será salvo junto com a venda.
 """, produtos=produtos, clientes=clientes)
 
 
+@app.route("/vendas")
+def listar_vendas():
+    if not logado():
+        return redirect("/login")
+    pagina_numero = max(1, request.args.get("pagina", 1, type=int) or 1)
+    lista = vendas_validas().order_by(Venda.id.desc()).paginate(
+        page=pagina_numero, per_page=50, error_out=False
+    )
+    return pagina("""
+<h1>Vendas / Excluir</h1>
+<p>Localize a venda e clique em Excluir para conferir os detalhes.</p>
+<div class="tabela"><table>
+<tr><th>Nº / Data</th><th>Cliente</th><th>Produto</th><th>Quantidade</th>
+<th>Total</th><th>Pago</th><th>Ação</th></tr>
+{% for v in lista.items %}
+<tr><td>#{{ v.id }}<br>{{ (v.data|data_local).strftime('%d/%m/%Y %H:%M') }}</td>
+<td>{{ v.cliente.nome if v.cliente else 'Sem cliente' }}</td>
+<td>{{ v.produto.nome }}</td><td>{{ v.quantidade }} {{ v.produto.unidade }}</td>
+<td>{{ v.total|dinheiro }}</td><td>{{ v.pago|dinheiro }}</td>
+<td><a href="{{ url_for('excluir_venda', venda_id=v.id) }}">Excluir</a></td></tr>
+{% else %}<tr><td colspan="7">Nenhuma venda encontrada.</td></tr>{% endfor %}
+</table></div>
+<p>{% if lista.has_prev %}<a href="{{ url_for('listar_vendas', pagina=lista.prev_num) }}">Anterior</a>{% endif %}
+ Página {{ lista.page }}
+{% if lista.has_next %}<a href="{{ url_for('listar_vendas', pagina=lista.next_num) }}">Próxima</a>{% endif %}</p>
+""", lista=lista)
+
+
+@app.route("/vendas/<int:venda_id>/excluir", methods=["GET", "POST"])
+def excluir_venda(venda_id):
+    if not logado():
+        return redirect("/login")
+    if request.method == "POST":
+        esperado = session.get("csrf_excluir_venda", "")
+        recebido = request.form.get("csrf_excluir_venda", "")
+        if not esperado or not hmac.compare_digest(recebido, esperado):
+            return "Formulário expirado. Volte à lista de vendas e tente novamente.", 400
+        if request.form.get("confirmar") != "sim":
+            return "Confirme a exclusão da venda.", 400
+
+    # O bloqueio serializa a exclusão e os recebimentos de fiado.
+    venda = Venda.query.filter_by(id=venda_id).with_for_update().first_or_404()
+    if db.session.get(ExclusaoVenda, venda_id):
+        flash("Esta venda já foi excluída.", "erro")
+        return redirect("/vendas")
+
+    if request.method == "POST":
+        # Exige nova conferência caso um pagamento tenha ocorrido após abrir a tela.
+        if request.form.get("pago_conferido") != str(venda.pago):
+            flash("O valor pago mudou. Confira os detalhes novamente.", "erro")
+            return redirect(request.path)
+        try:
+            db.session.add(ExclusaoVenda(venda_id=venda.id))
+            db.session.execute(db.update(Produto).where(
+                Produto.id == venda.produto_id
+            ).values(estoque=Produto.estoque + venda.quantidade))
+            if venda.pago > 0:
+                db.session.add(Caixa(
+                    tipo="saida",
+                    descricao="Estorno por exclusão da venda #" + str(venda.id),
+                    valor=venda.pago
+                ))
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            app.logger.exception("Falha ao excluir venda %s", venda_id)
+            flash("Não foi possível excluir a venda. Nenhuma alteração foi salva.", "erro")
+            return redirect("/vendas")
+        flash("Venda excluída. Estoque devolvido e valores atualizados.", "sucesso")
+        return redirect("/vendas")
+
+    if "csrf_excluir_venda" not in session:
+        session["csrf_excluir_venda"] = secrets.token_urlsafe(32)
+    return pagina("""
+<div class="formulario">
+<h1>Excluir venda #{{ v.id }}</h1>
+<p>{{ (v.data|data_local).strftime('%d/%m/%Y %H:%M') }}</p>
+<p><strong>Cliente:</strong> {{ v.cliente.nome if v.cliente else 'Sem cliente' }}</p>
+<p><strong>Produto:</strong> {{ v.produto.nome }} — {{ v.quantidade }} {{ v.produto.unidade }}</p>
+<p><strong>Total:</strong> {{ v.total|dinheiro }} · <strong>Pago:</strong> {{ v.pago|dinheiro }}</p>
+<div class="aviso">
+<p>A venda sairá das listas e dos totais de vendas e lucro nos relatórios.
+Os produtos voltarão ao estoque e o fiado pendente será removido.</p>
+<p>Será registrada uma saída de <strong>{{ v.pago|dinheiro }}</strong> no caixa atual
+para estornar o que já foi recebido, mesmo se a venda for de um caixa anterior.
+Confira também a devolução do dinheiro ao cliente, quando houver.</p>
+<p>O registro original será guardado para conferência. Esta ação não pode ser desfeita pela tela.</p>
+</div>
+<form method="post">
+<input type="hidden" name="csrf_excluir_venda" value="{{ token }}">
+<input type="hidden" name="pago_conferido" value="{{ v.pago }}">
+<label><input style="width:auto" type="checkbox" name="confirmar" value="sim" required>
+Conferi a venda e confirmo a exclusão e o estorno.</label>
+<p><button style="background:#a32020" type="submit">Confirmar exclusão</button>
+<a href="/vendas" style="display:inline-block;padding:12px">Cancelar</a></p>
+</form></div>
+""", v=venda, token=session["csrf_excluir_venda"])
+
+
 @app.route("/fiado")
 def fiado():
     if not logado():
         return redirect("/login")
 
-    vendas = Venda.query.filter(
+    vendas = vendas_validas().filter(
         Venda.tipo == "fiado"
     ).order_by(Venda.id.desc()).all()
 
@@ -944,7 +1053,10 @@ def receber(venda_id):
     if not logado():
         return redirect("/login")
 
-    venda = db.get_or_404(Venda, venda_id)
+    venda = Venda.query.filter_by(id=venda_id).with_for_update().first_or_404()
+    if db.session.get(ExclusaoVenda, venda_id):
+        flash("Esta venda foi excluída e não pode receber pagamentos.", "erro")
+        return redirect("/fiado")
     valor = numero(request.form["valor"])
 
     if valor <= 0:
@@ -1179,7 +1291,7 @@ def relatorios():
         timezone.utc
     ).replace(tzinfo=None)
 
-    vendas = Venda.query.filter(
+    vendas = vendas_validas().filter(
         Venda.data >= inicio,
         Venda.data < fim
     ).order_by(Venda.data.desc(), Venda.id.desc()).all()
@@ -2203,3 +2315,4 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=porta
     )
+

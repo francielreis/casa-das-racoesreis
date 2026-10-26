@@ -128,6 +128,41 @@ class Venda(db.Model):
         return saldo
 
 
+class VendaGrupo(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    cliente_id = db.Column(
+        db.Integer,
+        db.ForeignKey("cliente.id"),
+        nullable=True
+    )
+    tipo = db.Column(db.String(20), nullable=False, default="avista")
+    total = db.Column(db.Numeric(12, 2), nullable=False, default=0)
+    pago = db.Column(db.Numeric(12, 2), nullable=False, default=0)
+    data = db.Column(db.DateTime, nullable=False, default=agora_utc)
+
+    cliente = db.relationship("Cliente")
+
+
+class VendaGrupoItem(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    grupo_id = db.Column(
+        db.Integer,
+        db.ForeignKey("venda_grupo.id"),
+        nullable=False,
+        index=True
+    )
+    venda_id = db.Column(
+        db.Integer,
+        db.ForeignKey("venda.id"),
+        nullable=False,
+        unique=True,
+        index=True
+    )
+
+    grupo = db.relationship("VendaGrupo")
+    venda = db.relationship("Venda")
+
+
 class Caixa(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     tipo = db.Column(db.String(20), nullable=False)
@@ -727,34 +762,40 @@ def venda():
     clientes = Cliente.query.order_by(Cliente.nome).all()
 
     if request.method == "POST":
-        produto = db.session.get(
-            Produto,
-            int(request.form["produto"])
-        )
-        quantidade = numero(request.form["quantidade"])
-        tipo = request.form["tipo"]
+        produto_ids = request.form.getlist("produto")
+        quantidades_texto = request.form.getlist("quantidade")
+        tipo = request.form.get("tipo", "")
 
-        if not produto:
-            flash("Produto não encontrado.", "erro")
+        if (
+            not produto_ids
+            or len(produto_ids) != len(quantidades_texto)
+        ):
+            flash("Adicione pelo menos um produto à compra.", "erro")
             return redirect("/venda")
-
-        if not quantidade.is_finite() or quantidade <= 0:
-            flash("Quantidade inválida.", "erro")
-            return redirect("/venda")
-
-        estoque = Decimal(produto.estoque or 0)
-
-        if quantidade > estoque:
-            flash("Não há estoque suficiente.", "erro")
-            return redirect("/venda")
-
-        preco = Decimal(produto.preco or 0)
-        custo = Decimal(produto.custo or 0)
-        total = preco * quantidade
-        lucro = (preco - custo) * quantidade
 
         if tipo not in ("avista", "fiado"):
             flash("Escolha à vista ou fiado.", "erro")
+            return redirect("/venda")
+
+        # Junta linhas repetidas do mesmo produto.
+        quantidades_por_produto = {}
+        try:
+            for produto_id_texto, quantidade_texto in zip(
+                produto_ids, quantidades_texto
+            ):
+                produto_id = int(produto_id_texto)
+                quantidade = numero(quantidade_texto)
+
+                if not quantidade.is_finite() or quantidade <= 0:
+                    raise ValueError("Quantidade inválida.")
+
+                quantidades_por_produto[produto_id] = (
+                    quantidades_por_produto.get(
+                        produto_id, Decimal("0")
+                    ) + quantidade
+                )
+        except (ValueError, TypeError):
+            flash("Confira os produtos e quantidades da compra.", "erro")
             return redirect("/venda")
 
         cliente_id = request.form.get("cliente", "").strip()
@@ -798,78 +839,207 @@ def venda():
             )
             return redirect("/venda")
 
-        if tipo == "avista":
-            pago = total
-        else:
-            try:
-                pago = Decimal(
-                    request.form.get("entrada", "0").replace(",", ".")
-                )
-            except Exception:
-                flash("Informe um pagamento válido.", "erro")
-                return redirect("/venda")
+        try:
+            itens = []
+            total_geral = Decimal("0")
 
-            if not pago.is_finite() or pago < 0 or pago > total:
-                flash(
-                    "O pagamento deve ficar entre zero e o total da venda.",
-                    "erro"
-                )
-                return redirect("/venda")
+            # Bloqueia os produtos durante a baixa de estoque.
+            for produto_id, quantidade in quantidades_por_produto.items():
+                produto = Produto.query.filter_by(
+                    id=produto_id
+                ).with_for_update().first()
 
-        if novo_nome:
-            cliente = Cliente(
-                nome=novo_nome,
-                telefone=novo_telefone
+                if produto is None:
+                    raise ValueError("Um dos produtos não foi encontrado.")
+
+                estoque = Decimal(produto.estoque or 0)
+                if quantidade > estoque:
+                    raise ValueError(
+                        "Estoque insuficiente para " + produto.nome + "."
+                    )
+
+                preco = Decimal(produto.preco or 0)
+                custo = Decimal(produto.custo or 0)
+                subtotal = preco * quantidade
+                lucro = (preco - custo) * quantidade
+                total_geral += subtotal
+
+                itens.append({
+                    "produto": produto,
+                    "quantidade": quantidade,
+                    "estoque": estoque,
+                    "preco": preco,
+                    "custo": custo,
+                    "subtotal": subtotal,
+                    "lucro": lucro
+                })
+
+            if tipo == "avista":
+                pago_total = total_geral
+            else:
+                try:
+                    pago_total = Decimal(
+                        request.form.get("entrada", "0").replace(",", ".")
+                    )
+                except Exception:
+                    raise ValueError("Informe um pagamento válido.")
+
+                if (
+                    not pago_total.is_finite()
+                    or pago_total < 0
+                    or pago_total > total_geral
+                ):
+                    raise ValueError(
+                        "O pagamento deve ficar entre zero e o total da compra."
+                    )
+
+            if novo_nome:
+                cliente = Cliente(
+                    nome=novo_nome,
+                    telefone=novo_telefone
+                )
+                db.session.add(cliente)
+                db.session.flush()
+                cliente_id = cliente.id
+
+            data_venda = agora_utc()
+            grupo = VendaGrupo(
+                cliente_id=cliente_id,
+                tipo=tipo,
+                total=total_geral,
+                pago=pago_total,
+                data=data_venda
             )
-            db.session.add(cliente)
+            db.session.add(grupo)
             db.session.flush()
-            cliente_id = cliente.id
 
-        nova_venda = Venda(
-            produto_id=produto.id,
-            cliente_id=cliente_id,
-            quantidade=quantidade,
-            preco_unitario=preco,
-            custo_unitario=custo,
-            total=total,
-            lucro=lucro,
-            tipo=tipo,
-            pago=pago
-        )
-        produto.estoque = estoque - quantidade
-        db.session.add(nova_venda)
+            restante_pago = pago_total
 
-        if pago > 0:
-            db.session.add(Caixa(
-                tipo="entrada",
-                descricao="Venda - " + produto.nome,
-                valor=pago
-            ))
+            for item in itens:
+                if tipo == "avista":
+                    pago_item = item["subtotal"]
+                else:
+                    pago_item = min(
+                        restante_pago,
+                        item["subtotal"]
+                    )
+                    restante_pago -= pago_item
 
-        db.session.commit()
-        flash("Venda realizada com sucesso.", "sucesso")
-        return redirect("/")
+                nova_venda = Venda(
+                    produto_id=item["produto"].id,
+                    cliente_id=cliente_id,
+                    quantidade=item["quantidade"],
+                    preco_unitario=item["preco"],
+                    custo_unitario=item["custo"],
+                    total=item["subtotal"],
+                    lucro=item["lucro"],
+                    tipo=tipo,
+                    pago=pago_item,
+                    data=data_venda
+                )
+                item["produto"].estoque = (
+                    item["estoque"] - item["quantidade"]
+                )
+                db.session.add(nova_venda)
+                db.session.flush()
+
+                db.session.add(VendaGrupoItem(
+                    grupo_id=grupo.id,
+                    venda_id=nova_venda.id
+                ))
+
+            if pago_total > 0:
+                nome_cliente = (
+                    db.session.get(Cliente, cliente_id).nome
+                    if cliente_id else "Sem cliente"
+                )
+                db.session.add(Caixa(
+                    tipo="entrada",
+                    descricao=(
+                        "Compra #" + str(grupo.id)
+                        + " - " + nome_cliente
+                        + " - " + str(len(itens)) + " item(ns)"
+                    ),
+                    valor=pago_total,
+                    data=data_venda
+                ))
+
+            db.session.commit()
+            flash(
+                "Compra #" + str(grupo.id)
+                + " finalizada com "
+                + str(len(itens)) + " produto(s).",
+                "sucesso"
+            )
+            return redirect(
+                url_for("detalhe_compra", grupo_id=grupo.id)
+            )
+
+        except ValueError as erro:
+            db.session.rollback()
+            flash(str(erro), "erro")
+            return redirect("/venda")
+        except Exception:
+            db.session.rollback()
+            app.logger.exception("Falha ao registrar compra com vários itens")
+            flash(
+                "Não foi possível salvar a compra. Nenhuma alteração foi feita.",
+                "erro"
+            )
+            return redirect("/venda")
 
     return pagina("""
 <h1>Nova venda</h1>
-<div class="formulario">
-<form method="post">
+<p>
+Adicione todos os produtos que o cliente comprou e finalize uma única compra.
+</p>
+
+<form method="post" id="form-venda">
+<div class="formulario" style="max-width:850px">
+<h2>Itens da compra</h2>
+
+<div id="itens-venda">
+<div class="item-venda" style="border:1px solid #ddd;border-radius:9px;padding:12px;margin-bottom:12px">
 <label>Produto</label>
-<select name="produto">
+<select name="produto" class="produto-venda" required>
 {% for produto in produtos %}
-<option value="{{ produto.id }}">
+<option value="{{ produto.id }}"
+        data-preco="{{ produto.preco }}"
+        data-estoque="{{ produto.estoque }}"
+        data-unidade="{{ produto.unidade }}">
 {{ produto.nome }} |
-Estoque: {{ produto.estoque }} |
+Estoque: {{ produto.estoque }} {{ produto.unidade }} |
 {{ produto.preco|dinheiro }}
 </option>
 {% endfor %}
 </select>
 
 <label>Quantidade</label>
-<input name="quantidade" type="number" step="0.001" required>
+<input name="quantidade" class="quantidade-venda"
+       type="number" step="0.001" min="0.001" required>
+
+<div class="subtotal-item" style="font-weight:bold;margin-bottom:8px">
+Subtotal: R$ 0,00
+</div>
+<button type="button" class="remover-item"
+        style="display:none;background:#8b1e1e">
+Remover produto
+</button>
+</div>
+</div>
+
+<button type="button" id="adicionar-item"
+        style="background:#315f93;margin-bottom:18px">
++ Adicionar outro produto
+</button>
+
+<div class="card" style="margin-bottom:18px">
+<h3>Total da compra</h3>
+<div class="valor" id="total-compra">R$ 0,00</div>
+</div>
 
 <label>Tipo da venda</label>
-<select name="tipo">
+<select name="tipo" id="tipo-venda">
 <option value="avista">À vista</option>
 <option value="fiado">Fiado</option>
 </select>
@@ -882,10 +1052,9 @@ Estoque: {{ produto.estoque }} |
 {% endfor %}
 </select>
 
-<h2>Cadastrar cliente nesta venda</h2>
+<h2>Cliente novo</h2>
 <p>
-Para um novo cliente, deixe a seleção acima em “Nenhum”.
-O cadastro será salvo junto com a venda.
+Se for um novo cliente, deixe “Cliente cadastrado” em Nenhum.
 </p>
 
 <label for="novo_cliente_nome">Nome do novo cliente</label>
@@ -895,13 +1064,205 @@ O cadastro será salvo junto com a venda.
 <input id="novo_cliente_telefone" name="novo_cliente_telefone"
        type="tel" maxlength="50">
 
-<label>Valor pago agora em venda fiado</label>
-<input name="entrada" type="number" step="0.01" value="0">
-
-<button>Finalizar venda</button>
-</form>
+<div id="area-entrada" hidden>
+<label>Valor pago agora (venda fiado)</label>
+<input name="entrada" id="entrada-venda"
+       type="number" step="0.01" min="0" value="0">
 </div>
+
+<button type="submit">Finalizar compra</button>
+</div>
+</form>
+
+<template id="modelo-item">
+<div class="item-venda" style="border:1px solid #ddd;border-radius:9px;padding:12px;margin-bottom:12px">
+<label>Produto</label>
+<select name="produto" class="produto-venda" required>
+{% for produto in produtos %}
+<option value="{{ produto.id }}"
+        data-preco="{{ produto.preco }}"
+        data-estoque="{{ produto.estoque }}"
+        data-unidade="{{ produto.unidade }}">
+{{ produto.nome }} |
+Estoque: {{ produto.estoque }} {{ produto.unidade }} |
+{{ produto.preco|dinheiro }}
+</option>
+{% endfor %}
+</select>
+
+<label>Quantidade</label>
+<input name="quantidade" class="quantidade-venda"
+       type="number" step="0.001" min="0.001" required>
+
+<div class="subtotal-item" style="font-weight:bold;margin-bottom:8px">
+Subtotal: R$ 0,00
+</div>
+<button type="button" class="remover-item"
+        style="background:#8b1e1e">
+Remover produto
+</button>
+</div>
+</template>
+
+<script>
+(function(){
+    const itens = document.getElementById("itens-venda");
+    const modelo = document.getElementById("modelo-item");
+    const adicionar = document.getElementById("adicionar-item");
+    const total = document.getElementById("total-compra");
+    const tipo = document.getElementById("tipo-venda");
+    const areaEntrada = document.getElementById("area-entrada");
+
+    function moeda(valor){
+        return valor.toLocaleString("pt-BR", {
+            style: "currency",
+            currency: "BRL"
+        });
+    }
+
+    function atualizar(){
+        let soma = 0;
+
+        itens.querySelectorAll(".item-venda").forEach((linha)=>{
+            const select = linha.querySelector(".produto-venda");
+            const quantidade = linha.querySelector(".quantidade-venda");
+            const opcao = select.options[select.selectedIndex];
+            const preco = Number(opcao.dataset.preco || 0);
+            const qtd = Number(quantidade.value || 0);
+            const subtotal = preco * qtd;
+
+            linha.querySelector(".subtotal-item").textContent =
+                "Subtotal: " + moeda(subtotal);
+            soma += subtotal;
+        });
+
+        total.textContent = moeda(soma);
+        areaEntrada.hidden = tipo.value !== "fiado";
+    }
+
+    function preparar(linha){
+        linha.querySelector(".produto-venda").addEventListener(
+            "change", atualizar
+        );
+        linha.querySelector(".quantidade-venda").addEventListener(
+            "input", atualizar
+        );
+
+        const remover = linha.querySelector(".remover-item");
+        remover.addEventListener("click", ()=>{
+            linha.remove();
+            atualizar();
+        });
+    }
+
+    preparar(itens.querySelector(".item-venda"));
+
+    adicionar.addEventListener("click", ()=>{
+        const fragmento = modelo.content.cloneNode(true);
+        const linha = fragmento.querySelector(".item-venda");
+        itens.appendChild(fragmento);
+        preparar(linha);
+        atualizar();
+    });
+
+    tipo.addEventListener("change", atualizar);
+    atualizar();
+})();
+</script>
 """, produtos=produtos, clientes=clientes)
+
+
+@app.route("/vendas/compra/<int:grupo_id>")
+def detalhe_compra(grupo_id):
+    if not logado():
+        return redirect("/login")
+
+    grupo = db.get_or_404(VendaGrupo, grupo_id)
+
+    vinculos = VendaGrupoItem.query.filter_by(
+        grupo_id=grupo.id
+    ).order_by(VendaGrupoItem.id).all()
+
+    vendas_excluidas = {
+        item.venda_id
+        for item in ExclusaoVenda.query.filter(
+            ExclusaoVenda.venda_id.in_(
+                [v.venda_id for v in vinculos] or [-1]
+            )
+        ).all()
+    }
+
+    itens = [
+        vinculo.venda
+        for vinculo in vinculos
+        if vinculo.venda_id not in vendas_excluidas
+    ]
+
+    total_atual = sum(
+        (Decimal(v.total or 0) for v in itens),
+        Decimal("0")
+    )
+    lucro_atual = sum(
+        (Decimal(v.lucro or 0) for v in itens),
+        Decimal("0")
+    )
+
+    return pagina("""
+<h1>Compra #{{ grupo.id }}</h1>
+<p>
+<strong>Data:</strong>
+{{ (grupo.data|data_local).strftime("%d/%m/%Y %H:%M") }}<br>
+<strong>Cliente:</strong>
+{{ grupo.cliente.nome if grupo.cliente else "Sem cliente" }}<br>
+<strong>Tipo:</strong>
+{{ "Fiado" if grupo.tipo == "fiado" else "À vista" }}
+</p>
+
+<div class="tabela">
+<table>
+<tr>
+<th>Produto</th>
+<th>Quantidade</th>
+<th>Preço unitário</th>
+<th>Subtotal</th>
+<th>Lucro</th>
+</tr>
+{% for venda in itens %}
+<tr>
+<td>{{ venda.produto.nome }}</td>
+<td>{{ venda.quantidade }} {{ venda.produto.unidade }}</td>
+<td>{{ venda.preco_unitario|dinheiro }}</td>
+<td>{{ venda.total|dinheiro }}</td>
+<td>{{ venda.lucro|dinheiro }}</td>
+</tr>
+{% else %}
+<tr><td colspan="5">Todos os itens desta compra foram excluídos.</td></tr>
+{% endfor %}
+<tfoot>
+<tr>
+<th colspan="3">TOTAL</th>
+<th>{{ total_atual|dinheiro }}</th>
+<th>{{ lucro_atual|dinheiro }}</th>
+</tr>
+</tfoot>
+</table>
+</div>
+
+<p>
+<strong>Pago no momento da compra:</strong> {{ grupo.pago|dinheiro }}
+</p>
+
+<p>
+<a href="/venda">+ Nova venda</a>
+&nbsp;•&nbsp;
+<a href="/vendas">Ver vendas</a>
+</p>
+""",
+        grupo=grupo,
+        itens=itens,
+        total_atual=total_atual,
+        lucro_atual=lucro_atual
+    )
 
 
 @app.route("/vendas")

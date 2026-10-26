@@ -1317,6 +1317,37 @@ def relatorios():
         Decimal("0")
     )
 
+    produtos_agrupados = []
+    if periodo in ("mensal", "personalizado"):
+        resumo_produtos = {}
+
+        for venda in vendas:
+            produto = venda.produto
+            item = resumo_produtos.setdefault(
+                venda.produto_id,
+                {
+                    "produto": produto.nome,
+                    "unidade": produto.unidade,
+                    "quantidade": Decimal("0"),
+                    "faturamento": Decimal("0"),
+                    "lucro": Decimal("0"),
+                    "vendas": 0
+                }
+            )
+            item["quantidade"] += Decimal(venda.quantidade or 0)
+            item["faturamento"] += Decimal(venda.total or 0)
+            item["lucro"] += Decimal(venda.lucro or 0)
+            item["vendas"] += 1
+
+        produtos_agrupados = sorted(
+            resumo_produtos.values(),
+            key=lambda item: (
+                item["faturamento"],
+                item["quantidade"]
+            ),
+            reverse=True
+        )
+
     return pagina("""
 <h1>Relatórios</h1>
 
@@ -1412,7 +1443,56 @@ lançamentos manuais. Lucro bruto não desconta despesas.
 Movimentação líquida não é o saldo acumulado do caixa.
 </p>
 
-<h2>Vendas</h2>
+{% if periodo in ("mensal", "personalizado") %}
+<h2>📦 Resumo por produto</h2>
+<p>
+Esta tabela soma todas as vendas válidas do período por produto.
+O lucro é o valor gravado em cada venda, preservando o histórico
+mesmo quando o preço ou custo do produto muda depois.
+</p>
+<div class="tabela">
+<table>
+<thead>
+<tr>
+<th>Produto</th>
+<th>Unidade</th>
+<th>Quantidade vendida</th>
+<th>Faturamento</th>
+<th>Lucro bruto</th>
+<th>Nº de vendas</th>
+</tr>
+</thead>
+<tbody>
+{% for item in produtos_agrupados %}
+<tr>
+<td><strong>{{ item.produto }}</strong></td>
+<td>{{ item.unidade }}</td>
+<td>{{ item.quantidade }}</td>
+<td>{{ item.faturamento|dinheiro }}</td>
+<td>{{ item.lucro|dinheiro }}</td>
+<td>{{ item.vendas }}</td>
+</tr>
+{% else %}
+<tr>
+<td colspan="6">Nenhuma venda no período selecionado.</td>
+</tr>
+{% endfor %}
+</tbody>
+{% if produtos_agrupados %}
+<tfoot>
+<tr>
+<th colspan="3">TOTAL DO PERÍODO</th>
+<th>{{ total|dinheiro }}</th>
+<th>{{ lucro|dinheiro }}</th>
+<th>{{ vendas|length }}</th>
+</tr>
+</tfoot>
+{% endif %}
+</table>
+</div>
+{% endif %}
+
+<h2>Vendas detalhadas</h2>
 <div class="tabela">
 <table>
 <tr>
@@ -1469,7 +1549,8 @@ Movimentação líquida não é o saldo acumulado do caixa.
         lucro=lucro,
         entradas=entradas,
         saidas=saidas,
-        fiado_atual=fiado_atual
+        fiado_atual=fiado_atual,
+        produtos_agrupados=produtos_agrupados
     )
 
 

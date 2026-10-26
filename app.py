@@ -300,6 +300,7 @@ h1{color:#176b3a}
 <a href="/fiado">Fiado</a>
 <a href="/caixa">Caixa</a>
 <a href="/relatorios">Relatórios</a>
+<a href="/analise-negocio">Análise do Negócio</a>
 <a href="/catalogo">Catálogo público</a>
 <a href="/banners">Banners</a>
 <a href="/logout">Sair</a>
@@ -1469,6 +1470,353 @@ Movimentação líquida não é o saldo acumulado do caixa.
         entradas=entradas,
         saidas=saidas,
         fiado_atual=fiado_atual
+    )
+
+
+@app.route("/analise-negocio")
+def analise_negocio():
+    if not logado():
+        return redirect("/login")
+
+    agora = datetime.now(FUSO_LOJA)
+    mes_texto = request.args.get("mes", agora.strftime("%Y-%m"))
+
+    try:
+        inicio_local = datetime.strptime(
+            mes_texto, "%Y-%m"
+        ).replace(tzinfo=FUSO_LOJA)
+    except ValueError:
+        flash("Mês inválido.", "erro")
+        return redirect("/analise-negocio")
+
+    if inicio_local.month == 12:
+        fim_local = inicio_local.replace(
+            year=inicio_local.year + 1,
+            month=1
+        )
+    else:
+        fim_local = inicio_local.replace(
+            month=inicio_local.month + 1
+        )
+
+    inicio = inicio_local.astimezone(
+        timezone.utc
+    ).replace(tzinfo=None)
+    fim = fim_local.astimezone(
+        timezone.utc
+    ).replace(tzinfo=None)
+
+    vendas = vendas_validas().filter(
+        Venda.data >= inicio,
+        Venda.data < fim
+    ).order_by(Venda.data.asc(), Venda.id.asc()).all()
+
+    total_vendido = sum(
+        (Decimal(v.total or 0) for v in vendas),
+        Decimal("0")
+    )
+    lucro_total = sum(
+        (Decimal(v.lucro or 0) for v in vendas),
+        Decimal("0")
+    )
+
+    por_produto = {}
+    por_cliente = {}
+    por_dia = {}
+
+    for venda in vendas:
+        produto = venda.produto
+        registro = por_produto.setdefault(
+            venda.produto_id,
+            {
+                "nome": produto.nome,
+                "unidade": produto.unidade,
+                "quantidade": Decimal("0"),
+                "total": Decimal("0"),
+                "lucro": Decimal("0")
+            }
+        )
+        registro["quantidade"] += Decimal(venda.quantidade or 0)
+        registro["total"] += Decimal(venda.total or 0)
+        registro["lucro"] += Decimal(venda.lucro or 0)
+
+        if venda.cliente_id and venda.cliente:
+            cliente = por_cliente.setdefault(
+                venda.cliente_id,
+                {
+                    "nome": venda.cliente.nome,
+                    "total": Decimal("0"),
+                    "compras": 0
+                }
+            )
+            cliente["total"] += Decimal(venda.total or 0)
+            cliente["compras"] += 1
+
+        dia = data_local(venda.data).date()
+        por_dia[dia] = por_dia.get(
+            dia, Decimal("0")
+        ) + Decimal(venda.total or 0)
+
+    mais_vendido = max(
+        por_produto.values(),
+        key=lambda item: item["quantidade"],
+        default=None
+    )
+    mais_lucrativo = max(
+        por_produto.values(),
+        key=lambda item: item["lucro"],
+        default=None
+    )
+    melhor_cliente = max(
+        por_cliente.values(),
+        key=lambda item: item["total"],
+        default=None
+    )
+
+    if por_dia:
+        melhor_dia_data, melhor_dia_total = max(
+            por_dia.items(),
+            key=lambda item: item[1]
+        )
+        melhor_dia = {
+            "data": melhor_dia_data,
+            "total": melhor_dia_total
+        }
+    else:
+        melhor_dia = None
+
+    ids_vendidos = set(por_produto)
+    produtos_parados = [
+        produto
+        for produto in Produto.query.order_by(Produto.nome).all()
+        if Decimal(produto.estoque or 0) > 0
+        and produto.id not in ids_vendidos
+    ]
+
+    top_produtos = sorted(
+        por_produto.values(),
+        key=lambda item: item["total"],
+        reverse=True
+    )[:8]
+    maior_faturamento_produto = max(
+        (item["total"] for item in top_produtos),
+        default=Decimal("0")
+    )
+    for item in top_produtos:
+        item["percentual"] = (
+            float(item["total"] / maior_faturamento_produto * 100)
+            if maior_faturamento_produto > 0 else 0
+        )
+
+    vendas_por_dia = [
+        {"data": dia, "total": total}
+        for dia, total in sorted(por_dia.items())
+    ]
+    maior_dia = max(
+        (item["total"] for item in vendas_por_dia),
+        default=Decimal("0")
+    )
+    for item in vendas_por_dia:
+        item["percentual"] = (
+            float(item["total"] / maior_dia * 100)
+            if maior_dia > 0 else 0
+        )
+
+    return pagina("""
+<style>
+.indicador-destaque{
+    font-size:16px;
+    margin-top:6px;
+    line-height:1.45
+}
+.grafico-barras{
+    background:white;
+    border-radius:10px;
+    padding:16px;
+    box-shadow:0 2px 7px #00000015;
+    margin-bottom:20px
+}
+.linha-grafico{
+    display:grid;
+    grid-template-columns:minmax(120px,220px) 1fr minmax(90px,130px);
+    gap:10px;
+    align-items:center;
+    margin:10px 0
+}
+.barra-fundo{
+    height:18px;
+    background:#e9eceb;
+    border-radius:999px;
+    overflow:hidden
+}
+.barra-valor{
+    height:100%;
+    min-width:2px;
+    background:#176b3a;
+    border-radius:999px
+}
+.numero-grafico{text-align:right;font-weight:bold}
+@media(max-width:650px){
+    .linha-grafico{
+        grid-template-columns:1fr;
+        gap:4px
+    }
+    .numero-grafico{text-align:left}
+}
+</style>
+
+<h1>📊 Análise do Negócio</h1>
+<p>
+Indicadores calculados diretamente das vendas válidas do banco de dados.
+Vendas excluídas não entram nos resultados.
+</p>
+
+<form method="get" class="formulario">
+<label for="mes">Mês analisado</label>
+<input id="mes" name="mes" type="month" value="{{ mes_texto }}" required>
+<button>Atualizar análise</button>
+</form>
+
+<h2>{{ inicio_local.strftime("%m/%Y") }}</h2>
+
+<div class="cards">
+<div class="card">
+<h3>🧾 Total vendido</h3>
+<div class="valor">{{ total_vendido|dinheiro }}</div>
+<p>{{ vendas|length }} vendas registradas</p>
+</div>
+
+<div class="card">
+<h3>📈 Lucro bruto</h3>
+<div class="valor">{{ lucro_total|dinheiro }}</div>
+<p>Usa o lucro gravado no momento de cada venda.</p>
+</div>
+
+<div class="card">
+<h3>🥇 Produto mais vendido</h3>
+{% if mais_vendido %}
+<div class="valor">{{ mais_vendido.nome }}</div>
+<p class="indicador-destaque">
+{{ mais_vendido.quantidade }} {{ mais_vendido.unidade }}
+</p>
+{% else %}
+<p>Sem vendas no período.</p>
+{% endif %}
+</div>
+
+<div class="card">
+<h3>💰 Produto que mais deu lucro</h3>
+{% if mais_lucrativo %}
+<div class="valor">{{ mais_lucrativo.nome }}</div>
+<p class="indicador-destaque">
+{{ mais_lucrativo.lucro|dinheiro }}
+</p>
+{% else %}
+<p>Sem vendas no período.</p>
+{% endif %}
+</div>
+
+<div class="card">
+<h3>📅 Melhor dia de vendas</h3>
+{% if melhor_dia %}
+<div class="valor">{{ melhor_dia.total|dinheiro }}</div>
+<p class="indicador-destaque">
+{{ melhor_dia.data.strftime("%d/%m/%Y") }}
+</p>
+{% else %}
+<p>Sem vendas no período.</p>
+{% endif %}
+</div>
+
+<div class="card">
+<h3>👤 Cliente que mais comprou</h3>
+{% if melhor_cliente %}
+<div class="valor">{{ melhor_cliente.nome }}</div>
+<p class="indicador-destaque">
+{{ melhor_cliente.total|dinheiro }} em
+{{ melhor_cliente.compras }} compra(s)
+</p>
+{% else %}
+<p>Nenhuma venda com cliente identificado.</p>
+{% endif %}
+</div>
+</div>
+
+<h2>Faturamento por produto</h2>
+<div class="grafico-barras">
+{% for item in top_produtos %}
+<div class="linha-grafico">
+<div>{{ item.nome }}</div>
+<div class="barra-fundo" title="{{ item.total|dinheiro }}">
+<div class="barra-valor" style="width:{{ '%.2f'|format(item.percentual) }}%"></div>
+</div>
+<div class="numero-grafico">{{ item.total|dinheiro }}</div>
+</div>
+{% else %}
+<p>Nenhuma venda no período.</p>
+{% endfor %}
+</div>
+
+<h2>Vendas por dia</h2>
+<div class="grafico-barras">
+{% for item in vendas_por_dia %}
+<div class="linha-grafico">
+<div>{{ item.data.strftime("%d/%m") }}</div>
+<div class="barra-fundo" title="{{ item.total|dinheiro }}">
+<div class="barra-valor" style="width:{{ '%.2f'|format(item.percentual) }}%"></div>
+</div>
+<div class="numero-grafico">{{ item.total|dinheiro }}</div>
+</div>
+{% else %}
+<p>Nenhuma venda no período.</p>
+{% endfor %}
+</div>
+
+<h2>📦 Produtos parados no estoque</h2>
+<p>
+Produtos com estoque acima de zero e nenhuma venda registrada no mês escolhido.
+</p>
+<div class="tabela">
+<table>
+<tr>
+<th>Produto</th>
+<th>Estoque atual</th>
+<th>Situação</th>
+</tr>
+{% for produto in produtos_parados %}
+<tr>
+<td>{{ produto.nome }}</td>
+<td>{{ produto.estoque }} {{ produto.unidade }}</td>
+<td>Sem venda no mês</td>
+</tr>
+{% else %}
+<tr>
+<td colspan="3">Nenhum produto com estoque ficou sem vender neste mês.</td>
+</tr>
+{% endfor %}
+</table>
+</div>
+
+<p class="aviso">
+<strong>Como usar esses dados:</strong>
+produtos com alto faturamento e giro merecem atenção no estoque;
+produtos parados devem ser avaliados antes de novas compras;
+o lucro usa o custo registrado em cada venda, preservando o histórico mesmo
+quando o preço atual do produto muda.
+</p>
+""",
+        mes_texto=mes_texto,
+        inicio_local=inicio_local,
+        vendas=vendas,
+        total_vendido=total_vendido,
+        lucro_total=lucro_total,
+        mais_vendido=mais_vendido,
+        mais_lucrativo=mais_lucrativo,
+        melhor_cliente=melhor_cliente,
+        melhor_dia=melhor_dia,
+        produtos_parados=produtos_parados,
+        top_produtos=top_produtos,
+        vendas_por_dia=vendas_por_dia
     )
 
 

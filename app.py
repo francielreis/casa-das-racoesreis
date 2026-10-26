@@ -1674,11 +1674,16 @@ def analise_negocio():
         and produto.id not in ids_vendidos
     ]
 
-    top_produtos = sorted(
+    produtos_tabela = sorted(
         por_produto.values(),
-        key=lambda item: item["total"],
+        key=lambda item: (
+            item["total"],
+            item["quantidade"]
+        ),
         reverse=True
-    )[:8]
+    )
+
+    top_produtos = produtos_tabela[:8]
     maior_faturamento_produto = max(
         (item["total"] for item in top_produtos),
         default=Decimal("0")
@@ -1853,6 +1858,56 @@ Vendas excluídas não entram nos resultados.
 {% endfor %}
 </div>
 
+<h2>📋 Tabela completa por produto</h2>
+<p>
+Resumo de todos os produtos vendidos no mês escolhido.
+</p>
+<div class="tabela">
+<table>
+<thead>
+<tr>
+<th>Produto</th>
+<th>Quantidade vendida</th>
+<th>Faturamento</th>
+<th>Lucro bruto</th>
+</tr>
+</thead>
+<tbody>
+{% for item in produtos_tabela %}
+<tr>
+<td><strong>{{ item.nome }}</strong></td>
+<td>{{ item.quantidade }} {{ item.unidade }}</td>
+<td>{{ item.total|dinheiro }}</td>
+<td>{{ item.lucro|dinheiro }}</td>
+</tr>
+{% else %}
+<tr>
+<td colspan="4">Nenhuma venda no mês selecionado.</td>
+</tr>
+{% endfor %}
+</tbody>
+{% if produtos_tabela %}
+<tfoot>
+<tr>
+<th colspan="2">TOTAL DO MÊS</th>
+<th>{{ total_vendido|dinheiro }}</th>
+<th>{{ lucro_total|dinheiro }}</th>
+</tr>
+</tfoot>
+{% endif %}
+</table>
+</div>
+
+<p>
+<a href="{{ url_for('relatorios', periodo='mensal', data=inicio_local.strftime('%Y-%m-%d')) }}">
+Ver relatório mensal detalhado
+</a>
+&nbsp;•&nbsp;
+<a href="{{ url_for('relatorios', periodo='personalizado') }}">
+Abrir relatório personalizado
+</a>
+</p>
+
 <h2>📦 Produtos parados no estoque</h2>
 <p>
 Produtos com estoque acima de zero e nenhuma venda registrada no mês escolhido.
@@ -1896,6 +1951,7 @@ quando o preço atual do produto muda.
         melhor_cliente=melhor_cliente,
         melhor_dia=melhor_dia,
         produtos_parados=produtos_parados,
+        produtos_tabela=produtos_tabela,
         top_produtos=top_produtos,
         vendas_por_dia=vendas_por_dia
     )

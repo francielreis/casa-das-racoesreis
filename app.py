@@ -474,14 +474,29 @@ def painel():
 <div class="tabela">
 <table>
 <tr>
-<th>Produto</th><th>Total</th><th>Lucro</th><th>Pagamento</th>
+<th>Horário</th>
+<th>Cliente</th>
+<th>Produto</th>
+<th>Total</th>
+<th>Lucro</th>
+<th>Pagamento</th>
 </tr>
 {% for venda in ultimas %}
 <tr>
+<td>
+{{ (venda.data|data_local).strftime("%d/%m %H:%M") }}
+</td>
+<td>
+{{ venda.cliente.nome if venda.cliente else "Sem cliente" }}
+</td>
 <td>{{ venda.produto.nome }}</td>
 <td>{{ venda.total|dinheiro }}</td>
 <td>{{ venda.lucro|dinheiro }}</td>
 <td>{{ "Fiado" if venda.tipo == "fiado" else "À vista" }}</td>
+</tr>
+{% else %}
+<tr>
+<td colspan="6">Nenhuma venda registrada.</td>
 </tr>
 {% endfor %}
 </table>

@@ -202,10 +202,24 @@ def movimentos_atuais():
 
 
 def eh_compra_de_mercadoria(movimento):
-    # Entradas de estoque só são despesa quando o pagamento sai do caixa.
+    # Compras de estoque pagas pelo caixa, separadas das despesas da loja.
     return (
         movimento.tipo == "saida"
         and (movimento.descricao or "").startswith("Compra de mercadoria - ")
+    )
+
+
+CATEGORIAS_DESPESAS = (
+    "Aluguel", "Energia elétrica", "Água", "Internet", "Telefone",
+    "Frete", "Manutenção", "Funcionários", "Impostos e taxas", "Outros"
+)
+PREFIXO_DESPESA = "Despesa da loja - "
+
+
+def eh_despesa_da_loja(movimento):
+    return (
+        movimento.tipo == "saida"
+        and (movimento.descricao or "").startswith(PREFIXO_DESPESA)
     )
 
 
@@ -343,6 +357,7 @@ h1{color:#176b3a}
 <a href="/clientes">Clientes</a>
 <a href="/fiado">Fiado</a>
 <a href="/caixa">Caixa</a>
+<a href="/despesas">Despesas</a>
 <a href="/relatorios">Relatórios</a>
 <a href="/analise-negocio">Análise do Negócio</a>
 <a href="/catalogo">Catálogo público</a>
@@ -444,7 +459,11 @@ def painel():
         (Decimal(m.valor or 0) for m in compras_registradas),
         Decimal("0")
     )
-    outras_saidas = saidas - total_compras
+    despesas_da_loja = sum(
+        (Decimal(m.valor or 0) for m in movimentos if eh_despesa_da_loja(m)),
+        Decimal("0")
+    )
+    outras_saidas = saidas - total_compras - despesas_da_loja
     ultimas_compras = sorted(
         compras_registradas, key=lambda m: m.id, reverse=True
     )[:10]
@@ -480,7 +499,12 @@ def painel():
 <div class="valor despesa">{{ total_compras|dinheiro }}</div>
 </div>
 <div class="card">
-<h3>🧾 Outras saídas</h3>
+<h3>🏠 Despesas da loja</h3>
+<div class="valor despesa">{{ despesas_da_loja|dinheiro }}</div>
+<p><a href="/despesas">Registrar despesa</a></p>
+</div>
+<div class="card">
+<h3>🧾 Outras saídas / retiradas</h3>
 <div class="valor despesa">{{ outras_saidas|dinheiro }}</div>
 </div>
 <div class="card">
@@ -561,6 +585,7 @@ def painel():
         baixos=baixos,
         ultimas=ultimas,
         total_compras=total_compras,
+        despesas_da_loja=despesas_da_loja,
         outras_saidas=outras_saidas,
         saidas=saidas,
         ultimas_compras=ultimas_compras
@@ -1561,7 +1586,12 @@ def caixa():
          if eh_compra_de_mercadoria(m)),
         Decimal("0")
     )
-    outras_saidas = saidas - compras
+    despesas_da_loja = sum(
+        (Decimal(m.valor or 0) for m in todos_movimentos
+         if eh_despesa_da_loja(m)),
+        Decimal("0")
+    )
+    outras_saidas = saidas - compras - despesas_da_loja
     movimentos = movimentos_atuais().order_by(
         Caixa.id.desc()
     ).limit(100).all()
@@ -1570,6 +1600,7 @@ def caixa():
 <h1>Caixa</h1>
 <p>Valores desde o último zeramento.
 <a href="/zerar-caixa">Zerar caixa e vendas</a></p>
+<p><a href="/despesas">Registrar aluguel e outras despesas da loja</a></p>
 <div class="cards">
 <div class="card">
 <h3>Saldo atual</h3>
@@ -1588,7 +1619,11 @@ def caixa():
 <div class="valor despesa">{{ compras|dinheiro }}</div>
 </div>
 <div class="card">
-<h3>Outras saídas</h3>
+<h3>Despesas da loja</h3>
+<div class="valor despesa">{{ despesas_da_loja|dinheiro }}</div>
+</div>
+<div class="card">
+<h3>Outras saídas / retiradas</h3>
 <div class="valor despesa">{{ outras_saidas|dinheiro }}</div>
 </div>
 </div>
@@ -1631,8 +1666,127 @@ def caixa():
         entradas=entradas,
         saidas=saidas,
         compras=compras,
+        despesas_da_loja=despesas_da_loja,
         outras_saidas=outras_saidas
     )
+
+
+@app.route("/despesas", methods=["GET", "POST"])
+def despesas():
+    if not logado():
+        return redirect("/login")
+
+    if "csrf_despesas" not in session:
+        session["csrf_despesas"] = secrets.token_urlsafe(32)
+
+    if request.method == "POST":
+        recebido = request.form.get("csrf_despesas", "")
+        esperado = session.get("csrf_despesas", "")
+        if not esperado or not hmac.compare_digest(recebido, esperado):
+            flash("A sessão expirou. Abra o formulário novamente.", "erro")
+            return redirect("/despesas")
+
+        categoria = request.form.get("categoria", "").strip()
+        detalhes = request.form.get("detalhes", "").strip()
+        valor_texto = request.form.get("valor", "").strip()
+
+        if categoria not in CATEGORIAS_DESPESAS:
+            flash("Selecione uma categoria válida.", "erro")
+            return redirect("/despesas")
+
+        if len(detalhes) > 160:
+            flash("Os detalhes devem ter no máximo 160 caracteres.", "erro")
+            return redirect("/despesas")
+
+        try:
+            valor = Decimal(valor_texto.replace(",", "."))
+            if (
+                not valor.is_finite()
+                or valor <= 0
+                or valor > Decimal("9999999999.99")
+                or valor != valor.quantize(Decimal("0.01"))
+            ):
+                raise ValueError()
+        except (InvalidOperation, ValueError):
+            flash("Informe um valor válido maior que zero, com até 2 casas decimais.", "erro")
+            return redirect("/despesas")
+
+        descricao = PREFIXO_DESPESA + categoria
+        if detalhes:
+            descricao += " - " + detalhes
+
+        db.session.add(Caixa(
+            tipo="saida",
+            descricao=descricao,
+            valor=valor,
+            data=agora_utc()
+        ))
+        db.session.commit()
+        flash("Despesa registrada e descontada do caixa.", "sucesso")
+        return redirect("/despesas")
+
+    lista = [
+        m for m in movimentos_atuais().filter(Caixa.tipo == "saida")
+        .order_by(Caixa.id.desc()).all()
+        if eh_despesa_da_loja(m)
+    ]
+    total = sum(
+        (Decimal(m.valor or 0) for m in lista), Decimal("0")
+    )
+
+    return pagina("""
+<h1>Despesas da loja</h1>
+<p>Cadastre aluguel, energia, água, internet e outros gastos.
+Cada lançamento é uma saída do caixa e fica salvo no histórico.</p>
+<div class="cards">
+<div class="card">
+<h3>🏠 Total de despesas desde o último zeramento</h3>
+<div class="valor despesa">{{ total|dinheiro }}</div>
+</div>
+</div>
+
+<br>
+<div class="formulario">
+<h2>Adicionar despesa</h2>
+<form method="post">
+<input type="hidden" name="csrf_despesas" value="{{ token }}">
+<label for="categoria">Tipo de despesa</label>
+<select id="categoria" name="categoria" required>
+{% for categoria in categorias %}
+<option value="{{ categoria }}">{{ categoria }}</option>
+{% endfor %}
+</select>
+<label for="detalhes">Descrição ou referência (opcional)</label>
+<input id="detalhes" name="detalhes" maxlength="160"
+       placeholder="Ex.: Aluguel de outubro de 2026">
+<label for="valor">Valor pago (R$)</label>
+<input id="valor" name="valor" type="text" inputmode="decimal"
+       placeholder="Ex.: 500,00" required>
+<p>O lançamento será descontado uma única vez do caixa. Não é cobrança automática mensal.</p>
+<button type="submit">Salvar despesa</button>
+</form>
+</div>
+
+<h2>Histórico de despesas</h2>
+<p>Despesas registradas desde o último zeramento.
+Para consultar períodos anteriores, acesse <a href="/relatorios">Relatórios</a>.</p>
+<div class="tabela">
+<table>
+<tr><th>Data e horário</th><th>Categoria / descrição</th><th>Valor</th></tr>
+{% for movimento in despesas %}
+<tr>
+<td>{{ (movimento.data|data_local).strftime("%d/%m/%Y %H:%M") }}</td>
+<td>{{ movimento.descricao.replace("Despesa da loja - ", "", 1) }}</td>
+<td>{{ movimento.valor|dinheiro }}</td>
+</tr>
+{% else %}
+<tr><td colspan="3">Nenhuma despesa cadastrada neste período.</td></tr>
+{% endfor %}
+</table>
+</div>
+<p><a href="/caixa">Ver todo o movimento do caixa</a></p>
+""", total=total, despesas=lista, categorias=CATEGORIAS_DESPESAS,
+        token=session["csrf_despesas"])
 
 
 @app.route("/zerar-caixa", methods=["GET", "POST"])

@@ -201,6 +201,14 @@ def movimentos_atuais():
     return Caixa.query.filter(Caixa.id > limite)
 
 
+def eh_compra_de_mercadoria(movimento):
+    # Entradas de estoque só são despesa quando o pagamento sai do caixa.
+    return (
+        movimento.tipo == "saida"
+        and (movimento.descricao or "").startswith("Compra de mercadoria - ")
+    )
+
+
 class BannerLoja(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     imagem = db.Column(db.LargeBinary, nullable=False)
@@ -276,6 +284,7 @@ nav a{
 }
 .card h3{font-size:14px;color:#666;margin-top:0}
 .valor{color:#176b3a;font-weight:bold;font-size:23px}
+.valor.despesa{color:#b42318}
 .formulario{
     max-width:650px;
     background:white;
@@ -428,6 +437,17 @@ def painel():
         Decimal("0")
     )
     saldo = entradas - saidas
+    compras_registradas = [
+        m for m in movimentos if eh_compra_de_mercadoria(m)
+    ]
+    total_compras = sum(
+        (Decimal(m.valor or 0) for m in compras_registradas),
+        Decimal("0")
+    )
+    outras_saidas = saidas - total_compras
+    ultimas_compras = sorted(
+        compras_registradas, key=lambda m: m.id, reverse=True
+    )[:10]
 
     baixos = Produto.query.filter(
         Produto.estoque <= Produto.estoque_minimo
@@ -455,7 +475,39 @@ def painel():
 <h3>📝 Fiado a receber</h3>
 <div class="valor">{{ fiado|dinheiro }}</div>
 </div>
+<div class="card">
+<h3>📦 Compras pagas pelo caixa</h3>
+<div class="valor despesa">{{ total_compras|dinheiro }}</div>
 </div>
+<div class="card">
+<h3>🧾 Outras saídas</h3>
+<div class="valor despesa">{{ outras_saidas|dinheiro }}</div>
+</div>
+<div class="card">
+<h3>💸 Total de saídas do caixa</h3>
+<div class="valor despesa">{{ saidas|dinheiro }}</div>
+</div>
+</div>
+
+<h2>Compras pagas pelo caixa</h2>
+<p>Registros desde o último zeramento. Para incluir uma compra, marque
+“Registrar compra como saída do caixa” na <a href="/entrada">Entrada de mercadoria</a>.
+</p>
+<div class="tabela">
+<table>
+<tr><th>Data e horário</th><th>Mercadoria</th><th>Valor pago</th></tr>
+{% for movimento in ultimas_compras %}
+<tr>
+<td>{{ (movimento.data|data_local).strftime("%d/%m/%Y %H:%M") }}</td>
+<td>{{ movimento.descricao.replace("Compra de mercadoria - ", "", 1) }}</td>
+<td>{{ movimento.valor|dinheiro }}</td>
+</tr>
+{% else %}
+<tr><td colspan="3">Nenhuma compra paga pelo caixa neste período.</td></tr>
+{% endfor %}
+</table>
+</div>
+<p><a href="/caixa">Ver movimentações do caixa</a></p>
 
 <h2>Estoque baixo</h2>
 <div class="tabela">
@@ -507,7 +559,11 @@ def painel():
         lucro_total=lucro_total,
         fiado=fiado,
         baixos=baixos,
-        ultimas=ultimas
+        ultimas=ultimas,
+        total_compras=total_compras,
+        outras_saidas=outras_saidas,
+        saidas=saidas,
+        ultimas_compras=ultimas_compras
     )
 
 
@@ -717,6 +773,8 @@ def entrada():
        name="registrar_caixa" value="sim">
 Registrar compra como saída do caixa
 </label>
+<p style="font-size:13px;color:#555">Marque somente se a compra foi paga com dinheiro do caixa.
+O valor aparecerá no resumo de compras do painel.</p>
 <br><br>
 <button>Registrar entrada</button>
 </form>
@@ -1498,6 +1556,12 @@ def caixa():
         Decimal("0")
     )
     saldo = entradas - saidas
+    compras = sum(
+        (Decimal(m.valor or 0) for m in todos_movimentos
+         if eh_compra_de_mercadoria(m)),
+        Decimal("0")
+    )
+    outras_saidas = saidas - compras
     movimentos = movimentos_atuais().order_by(
         Caixa.id.desc()
     ).limit(100).all()
@@ -1517,7 +1581,15 @@ def caixa():
 </div>
 <div class="card">
 <h3>Total de saídas</h3>
-<div class="valor">{{ saidas|dinheiro }}</div>
+<div class="valor despesa">{{ saidas|dinheiro }}</div>
+</div>
+<div class="card">
+<h3>Compras de mercadorias</h3>
+<div class="valor despesa">{{ compras|dinheiro }}</div>
+</div>
+<div class="card">
+<h3>Outras saídas</h3>
+<div class="valor despesa">{{ outras_saidas|dinheiro }}</div>
 </div>
 </div>
 
@@ -1557,7 +1629,9 @@ def caixa():
         movimentos=movimentos,
         saldo=saldo,
         entradas=entradas,
-        saidas=saidas
+        saidas=saidas,
+        compras=compras,
+        outras_saidas=outras_saidas
     )
 
 

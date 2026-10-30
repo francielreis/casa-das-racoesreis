@@ -1245,7 +1245,7 @@ def venda():
             )
             return redirect("/venda")
 
-    return pagina("""
+    return pagina(r"""
 <h1>Nova venda</h1>
 <p>
 Adicione todos os produtos que o cliente comprou e finalize uma única compra.
@@ -1259,6 +1259,8 @@ Adicione todos os produtos que o cliente comprou e finalize uma única compra.
 <div id="itens-venda">
 <div class="item-venda" style="border:1px solid #ddd;border-radius:9px;padding:12px;margin-bottom:12px">
 <label>Produto</label>
+<input class="busca-produto" type="search" placeholder="Pesquisar produto pelo nome..."
+       aria-label="Pesquisar produto" autocomplete="off">
 <select name="produto" class="produto-venda" required>
 <option value="" selected disabled>Selecione o produto</option>
 {% for produto in produtos %}
@@ -1266,17 +1268,19 @@ Adicione todos os produtos que o cliente comprou e finalize uma única compra.
         data-preco="{{ produto.preco }}"
         data-estoque="{{ produto.estoque }}"
         data-unidade="{{ produto.unidade }}">
-{{ produto.nome }} |
-Estoque: {{ produto.estoque }} {{ produto.unidade }} |
-{{ produto.preco|dinheiro }}
+{{ produto.nome }} — {{ produto.preco|dinheiro }} |
+Estoque: {{ produto.estoque|quantidade_legivel }} {{ produto.unidade }}
 </option>
 {% endfor %}
 </select>
 
 <label>Quantidade</label>
 <input name="quantidade" class="quantidade-venda"
-       type="number" step="0.001" min="0.001" required>
+       type="number" step="0.001" min="0.001" value="1" required>
 
+<div class="detalhes-produto" style="font-size:13px;color:#52645b;margin:0 0 8px">
+Escolha um produto para visualizar preço e estoque.
+</div>
 <div class="subtotal-item" style="font-weight:bold;margin-bottom:8px">
 Subtotal: R$ 0,00
 </div>
@@ -1336,6 +1340,8 @@ Se for um novo cliente, deixe “Cliente cadastrado” em Nenhum.
 <template id="modelo-item">
 <div class="item-venda" style="border:1px solid #ddd;border-radius:9px;padding:12px;margin-bottom:12px">
 <label>Produto</label>
+<input class="busca-produto" type="search" placeholder="Pesquisar produto pelo nome..."
+       aria-label="Pesquisar produto" autocomplete="off">
 <select name="produto" class="produto-venda" required>
 <option value="" selected disabled>Selecione o produto</option>
 {% for produto in produtos %}
@@ -1343,17 +1349,19 @@ Se for um novo cliente, deixe “Cliente cadastrado” em Nenhum.
         data-preco="{{ produto.preco }}"
         data-estoque="{{ produto.estoque }}"
         data-unidade="{{ produto.unidade }}">
-{{ produto.nome }} |
-Estoque: {{ produto.estoque }} {{ produto.unidade }} |
-{{ produto.preco|dinheiro }}
+{{ produto.nome }} — {{ produto.preco|dinheiro }} |
+Estoque: {{ produto.estoque|quantidade_legivel }} {{ produto.unidade }}
 </option>
 {% endfor %}
 </select>
 
 <label>Quantidade</label>
 <input name="quantidade" class="quantidade-venda"
-       type="number" step="0.001" min="0.001" required>
+       type="number" step="0.001" min="0.001" value="1" required>
 
+<div class="detalhes-produto" style="font-size:13px;color:#52645b;margin:0 0 8px">
+Escolha um produto para visualizar preço e estoque.
+</div>
 <div class="subtotal-item" style="font-weight:bold;margin-bottom:8px">
 Subtotal: R$ 0,00
 </div>
@@ -1373,6 +1381,17 @@ Remover produto
     const tipo = document.getElementById("tipo-venda");
     const areaEntrada = document.getElementById("area-entrada");
 
+    function filtrarProdutos(linha){
+        const campo = linha.querySelector(".busca-produto");
+        const select = linha.querySelector(".produto-venda");
+        const termo = campo.value.trim().toLocaleLowerCase("pt-BR");
+        for (const opcao of select.options) {
+            if (!opcao.value) continue;
+            const titulo = opcao.textContent.toLocaleLowerCase("pt-BR");
+            opcao.hidden = Boolean(termo) && !titulo.includes(termo);
+        }
+    }
+
     function moeda(valor){
         return valor.toLocaleString("pt-BR", {
             style: "currency",
@@ -1386,11 +1405,23 @@ Remover produto
         itens.querySelectorAll(".item-venda").forEach((linha)=>{
             const select = linha.querySelector(".produto-venda");
             const quantidade = linha.querySelector(".quantidade-venda");
-            const opcao = select.options[select.selectedIndex];
-            const preco = Number(opcao.dataset.preco || 0);
+            const opcao = select.selectedIndex >= 0 ?
+                select.options[select.selectedIndex] : null;
+            const preco = opcao && select.value ?
+                Number(opcao.dataset.preco || 0) : 0;
             const qtd = Number(quantidade.value || 0);
-            const subtotal = preco * qtd;
-
+            const subtotal = preco * Math.max(qtd, 0);
+            const detalhes = linha.querySelector(".detalhes-produto");
+            if (opcao && select.value) {
+                const estoque = Number(opcao.dataset.estoque || 0);
+                const unidade = opcao.dataset.unidade || "un";
+                detalhes.textContent = "Preço: " + moeda(preco) +
+                    " • Estoque: " + estoque.toLocaleString("pt-BR", {
+                        maximumFractionDigits: 3
+                    }) + " " + unidade;
+            } else {
+                detalhes.textContent = "Escolha um produto da lista.";
+            }
             linha.querySelector(".subtotal-item").textContent =
                 "Subtotal: " + moeda(subtotal);
             soma += subtotal;
@@ -1401,6 +1432,9 @@ Remover produto
     }
 
     function preparar(linha){
+        linha.querySelector(".busca-produto").addEventListener(
+            "input", ()=>filtrarProdutos(linha)
+        );
         linha.querySelector(".produto-venda").addEventListener(
             "change", atualizar
         );
@@ -1441,7 +1475,7 @@ Remover produto
                 return;
             }
             const preco = Number(opcao.dataset.preco || 0);
-            const nome = opcao.textContent.split("|")[0].trim();
+            const nome = opcao.textContent.split("—")[0].trim();
             const unidade = opcao.dataset.unidade || "un";
             ids.push(select.value);
             resumo.push(nome + " — " + quantidade.toLocaleString("pt-BR") +

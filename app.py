@@ -3,7 +3,7 @@ import secrets
 import hmac
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from urllib.parse import urlencode
 
 from flask import (
@@ -11,6 +11,7 @@ from flask import (
     render_template_string, Response, send_from_directory, url_for
 )
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy.exc import IntegrityError
 from markupsafe import Markup
 
 
@@ -163,6 +164,13 @@ class VendaGrupoItem(db.Model):
     venda = db.relationship("Venda")
 
 
+class VendaRequisicao(db.Model):
+    # Chave unica contra repeticao do formulario, inclusive com varios workers.
+    chave = db.Column(db.String(100), primary_key=True)
+    grupo_id = db.Column(db.Integer, db.ForeignKey("venda_grupo.id"), nullable=False)
+    criado_em = db.Column(db.DateTime, nullable=False, default=agora_utc)
+
+
 class Caixa(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     tipo = db.Column(db.String(20), nullable=False)
@@ -247,6 +255,20 @@ def dinheiro(valor):
 
 
 app.jinja_env.filters["dinheiro"] = dinheiro
+
+
+CENTAVO = Decimal("0.01")
+
+
+def dinheiro_decimal(valor):
+    return Decimal(valor).quantize(CENTAVO, rounding=ROUND_HALF_UP)
+
+
+def valor_monetario_valido(valor, permite_zero=False):
+    return (valor.is_finite()
+            and (valor >= 0 if permite_zero else valor > 0)
+            and valor <= Decimal("9999999999.99")
+            and valor == valor.quantize(CENTAVO))
 
 
 def quantidade_legivel(valor):
@@ -399,6 +421,7 @@ h1{color:#176b3a}
 <a href="/despesas">Despesas</a>
 <a href="/relatorios">Relatórios</a>
 <a href="/analise-negocio">Análise do Negócio</a>
+<a href="/auditoria-financeira">Auditoria financeira</a>
 <a href="/catalogo">Catálogo público</a>
 <a href="/banners">Banners</a>
 <a href="/logout">Sair</a>
@@ -674,14 +697,26 @@ def produtos():
         return redirect("/login")
 
     if request.method == "POST":
+        custo = numero(request.form.get("custo", ""))
+        preco = numero(request.form.get("preco", ""))
+        estoque = numero(request.form.get("estoque", "0"))
+        minimo = numero(request.form.get("estoque_minimo", "0"))
+        if not all((
+            valor_monetario_valido(custo, permite_zero=True),
+            valor_monetario_valido(preco, permite_zero=True),
+            estoque.is_finite() and 0 <= estoque <= 999999999,
+            minimo.is_finite() and 0 <= minimo <= 999999999
+        )):
+            flash("Confira preços, custos e estoque: não são aceitos valores negativos ou inválidos.", "erro")
+            return redirect("/produtos")
         produto = Produto(
             nome=request.form["nome"],
             categoria=request.form.get("categoria", ""),
             unidade=request.form["unidade"],
-            custo=numero(request.form["custo"]),
-            preco=numero(request.form["preco"]),
-            estoque=numero(request.form["estoque"]),
-            estoque_minimo=numero(request.form["estoque_minimo"])
+            custo=custo,
+            preco=preco,
+            estoque=estoque,
+            estoque_minimo=minimo
         )
         db.session.add(produto)
         db.session.commit()
@@ -829,12 +864,29 @@ def entrada():
             flash("Produto não encontrado.", "erro")
             return redirect("/entrada")
 
-        if quantidade <= 0:
+        if not quantidade.is_finite() or quantidade <= 0 or quantidade > 999999999:
             flash("Quantidade inválida.", "erro")
             return redirect("/entrada")
+        if not valor_monetario_valido(custo):
+            flash("Custo inválido: use valor positivo com até 2 casas decimais.", "erro")
+            return redirect("/entrada")
+        if quantidade != quantidade.quantize(Decimal("0.001")):
+            flash("Quantidade aceita até 3 casas decimais.", "erro")
+            return redirect("/entrada")
 
-        produto.estoque = Decimal(produto.estoque or 0) + quantidade
-        produto.custo = custo
+        produto = (Produto.query.filter_by(id=produto.id)
+                   .with_for_update().populate_existing().first())
+        estoque_antigo = Decimal(produto.estoque or 0)
+        custo_antigo = Decimal(produto.custo or 0)
+        if estoque_antigo < 0:
+            flash("Estoque negativo. Confira antes da nova entrada.", "erro")
+            return redirect("/entrada")
+        novo_estoque = estoque_antigo + quantidade
+        # Custo medio ponderado apenas para o estoque futuro.
+        produto.custo = dinheiro_decimal(
+            ((estoque_antigo * custo_antigo) + (quantidade * custo)) / novo_estoque
+        )
+        produto.estoque = novo_estoque
 
         registro = EntradaEstoque(
             produto_id=produto.id,
@@ -844,7 +896,7 @@ def entrada():
         db.session.add(registro)
 
         if request.form.get("registrar_caixa") == "sim":
-            valor_total = quantidade * custo
+            valor_total = dinheiro_decimal(quantidade * custo)
             db.session.add(Caixa(
                 tipo="saida",
                 descricao="Compra de mercadoria - " + produto.nome,
@@ -936,6 +988,15 @@ def venda():
     clientes = Cliente.query.order_by(Cliente.nome).all()
 
     if request.method == "POST":
+        chave_requisicao = request.form.get("chave_requisicao", "").strip()
+        if not chave_requisicao or len(chave_requisicao) > 100:
+            flash("Formulário inválido. Abra a tela de venda novamente.", "erro")
+            return redirect("/venda")
+        pedido_existente = db.session.get(VendaRequisicao, chave_requisicao)
+        if pedido_existente:
+            flash("Esta compra já está registrada. Nenhuma duplicação foi feita.", "sucesso")
+            return redirect(url_for("detalhe_compra", grupo_id=pedido_existente.grupo_id))
+
         produto_ids = request.form.getlist("produto")
         quantidades_texto = request.form.getlist("quantidade")
         tipo = request.form.get("tipo", "")
@@ -960,8 +1021,10 @@ def venda():
                 produto_id = int(produto_id_texto)
                 quantidade = numero(quantidade_texto)
 
-                if not quantidade.is_finite() or quantidade <= 0:
-                    raise ValueError("Quantidade inválida.")
+                if (not quantidade.is_finite() or quantidade <= 0
+                        or quantidade > 999999999
+                        or quantidade != quantidade.quantize(Decimal("0.001"))):
+                    raise ValueError("Quantidade inválida (máximo 3 casas decimais).")
 
                 quantidades_por_produto[produto_id] = (
                     quantidades_por_produto.get(
@@ -1034,8 +1097,14 @@ def venda():
 
                 preco = Decimal(produto.preco or 0)
                 custo = Decimal(produto.custo or 0)
-                subtotal = preco * quantidade
-                lucro = (preco - custo) * quantidade
+                if not (
+                    valor_monetario_valido(preco, permite_zero=True)
+                    and valor_monetario_valido(custo, permite_zero=True)
+                ):
+                    raise ValueError("Preço ou custo inválido para esse produto.")
+                subtotal = dinheiro_decimal(preco * quantidade)
+                custo_total = dinheiro_decimal(custo * quantidade)
+                lucro = subtotal - custo_total
                 total_geral += subtotal
 
                 itens.append({
@@ -1059,8 +1128,7 @@ def venda():
                     raise ValueError("Informe um pagamento válido.")
 
                 if (
-                    not pago_total.is_finite()
-                    or pago_total < 0
+                    not valor_monetario_valido(pago_total, permite_zero=True)
                     or pago_total > total_geral
                 ):
                     raise ValueError(
@@ -1122,6 +1190,12 @@ def venda():
                     venda_id=nova_venda.id
                 ))
 
+            # Unicidade imposta no PostgreSQL para impedir pedidos repetidos.
+            db.session.add(VendaRequisicao(
+                chave=chave_requisicao, grupo_id=grupo.id
+            ))
+            db.session.flush()
+
             if pago_total > 0:
                 nome_cliente = (
                     db.session.get(Cliente, cliente_id).nome
@@ -1153,6 +1227,15 @@ def venda():
             db.session.rollback()
             flash(str(erro), "erro")
             return redirect("/venda")
+        except IntegrityError:
+            db.session.rollback()
+            pedido_existente = db.session.get(VendaRequisicao, chave_requisicao)
+            if pedido_existente:
+                flash("Compra já registrada; duplicação bloqueada.", "sucesso")
+                return redirect(url_for("detalhe_compra", grupo_id=pedido_existente.grupo_id))
+            app.logger.exception("Falha de integridade ao salvar compra")
+            flash("Compra não registrada. Confira o histórico.", "erro")
+            return redirect("/venda")
         except Exception:
             db.session.rollback()
             app.logger.exception("Falha ao registrar compra com vários itens")
@@ -1169,6 +1252,7 @@ Adicione todos os produtos que o cliente comprou e finalize uma única compra.
 </p>
 
 <form method="post" id="form-venda">
+<input type="hidden" name="chave_requisicao" value="{{ chave_requisicao }}">
 <div class="formulario" style="max-width:850px">
 <h2>Itens da compra</h2>
 
@@ -1390,7 +1474,8 @@ Remover produto
     atualizar();
 })();
 </script>
-""", produtos=produtos, clientes=clientes)
+""", produtos=produtos, clientes=clientes,
+        chave_requisicao=secrets.token_urlsafe(32))
 
 
 @app.route("/vendas/compra/<int:grupo_id>")
@@ -1639,14 +1724,14 @@ def receber(venda_id):
         return redirect("/fiado")
     valor = numero(request.form["valor"])
 
-    if valor <= 0:
-        flash("Valor inválido.", "erro")
+    if not valor_monetario_valido(valor):
+        flash("Informe um pagamento positivo, com até 2 casas decimais.", "erro")
         return redirect("/fiado")
 
     saldo = venda.saldo_devedor
-
     if valor > saldo:
-        valor = saldo
+        flash("Pagamento superior ao saldo devedor. Confira o valor.", "erro")
+        return redirect("/fiado")
 
     venda.pago = Decimal(venda.pago or 0) + valor
 
@@ -1669,7 +1754,10 @@ def caixa():
         tipo = request.form["tipo"]
         valor = numero(request.form["valor"])
 
-        if valor <= 0:
+        if tipo not in ("entrada", "saida"):
+            flash("Tipo de movimentação inválido.", "erro")
+            return redirect("/caixa")
+        if not valor_monetario_valido(valor):
             flash("Valor inválido.", "erro")
             return redirect("/caixa")
 
@@ -2136,7 +2224,7 @@ Horário do Piauí. Semana de segunda a domingo.
 <div class="card">
 <h3>Vendas no período</h3>
 <div class="valor">{{ total|dinheiro }}</div>
-<p>{{ vendas|length }} vendas</p>
+<p>{{ vendas|length }} itens vendidos</p>
 </div>
 <div class="card">
 <h3>Lucro bruto das vendas</h3>
@@ -2278,6 +2366,199 @@ mesmo quando o preço ou custo do produto muda depois.
     )
 
 
+
+@app.route("/auditoria-financeira")
+def auditoria_financeira():
+    """Conciliação somente leitura; nunca corrige valores automaticamente."""
+    if not logado():
+        return redirect("/login")
+
+    vendas_todas = Venda.query.order_by(Venda.id).all()
+    exclusoes = {e.venda_id for e in ExclusaoVenda.query.all()}
+    validas = [v for v in vendas_todas if v.id not in exclusoes]
+    por_id = {v.id: v for v in vendas_todas}
+    grupos = VendaGrupo.query.order_by(VendaGrupo.id).all()
+    vinculos = VendaGrupoItem.query.order_by(VendaGrupoItem.id).all()
+    caixa_todo = Caixa.query.order_by(Caixa.id).all()
+    produtos = Produto.query.all()
+    vinculos_por_grupo = {}
+    for item in vinculos:
+        vinculos_por_grupo.setdefault(item.grupo_id, []).append(item.venda_id)
+
+    movimentos_por_compra = {}
+    recebimentos_por_venda = {}
+    for m in caixa_todo:
+        descricao = m.descricao or ""
+        if m.tipo == "entrada" and descricao.startswith("Compra #"):
+            try:
+                compra_id = int(descricao.split(" - ", 1)[0][8:])
+                movimentos_por_compra.setdefault(compra_id, []).append(m)
+            except (ValueError, IndexError):
+                pass
+        if m.tipo == "entrada" and descricao.startswith("Pagamento de fiado - Venda #"):
+            try:
+                venda_id = int(descricao.rsplit("#", 1)[1])
+                recebimentos_por_venda.setdefault(venda_id, []).append(m)
+            except (ValueError, IndexError):
+                pass
+
+    problemas = []
+    def apontar(nivel, origem, mensagem):
+        problemas.append({"nivel": nivel, "origem": origem, "mensagem": mensagem})
+
+    for v in vendas_todas:
+        qtd = Decimal(v.quantidade or 0)
+        preco = Decimal(v.preco_unitario or 0)
+        custo = Decimal(v.custo_unitario or 0)
+        total = Decimal(v.total or 0)
+        lucro = Decimal(v.lucro or 0)
+        pago = Decimal(v.pago or 0)
+        if qtd <= 0 or total < 0 or pago < 0 or pago > total:
+            apontar("Alerta", "Venda #" + str(v.id),
+                    "Quantidade, total ou pagamento fora dos limites.")
+        if abs(total - dinheiro_decimal(qtd * preco)) > CENTAVO:
+            apontar("Alerta", "Venda #" + str(v.id),
+                    "Total gravado diferente da quantidade × preço unitário.")
+        lucro_esperado = total - dinheiro_decimal(qtd * custo)
+        if abs(lucro - lucro_esperado) > CENTAVO:
+            apontar("Alerta", "Venda #" + str(v.id),
+                    "Lucro gravado diferente de total menos custo da mercadoria.")
+
+    for m in caixa_todo:
+        valor = Decimal(m.valor or 0)
+        if m.tipo not in ("entrada", "saida") or not valor_monetario_valido(valor):
+            apontar("Alerta", "Caixa #" + str(m.id),
+                    "Movimento com tipo ou valor inconsistente.")
+
+    for p in produtos:
+        if Decimal(p.estoque or 0) < 0:
+            apontar("Alerta", "Produto #" + str(p.id),
+                    "Estoque negativo: " + p.nome)
+
+    for grupo in grupos:
+        ids = vinculos_por_grupo.get(grupo.id, [])
+        itens = [por_id[i] for i in ids if i in por_id]
+        if len(itens) != len(ids) or not itens:
+            apontar("Alerta", "Compra #" + str(grupo.id),
+                    "Compra sem todos os itens associados.")
+        total_itens = sum((Decimal(v.total or 0) for v in itens), Decimal("0"))
+        if abs(total_itens - Decimal(grupo.total or 0)) > CENTAVO:
+            apontar("Alerta", "Compra #" + str(grupo.id),
+                    "Total do pedido diferente da soma de seus itens.")
+        lancamentos = movimentos_por_compra.get(grupo.id, [])
+        pago_inicial = Decimal(grupo.pago or 0)
+        valor_caixa = sum((Decimal(m.valor or 0) for m in lancamentos), Decimal("0"))
+        if abs(valor_caixa - pago_inicial) > CENTAVO:
+            apontar("Alerta", "Compra #" + str(grupo.id),
+                    "Entrada inicial no caixa diferente do pagamento da compra.")
+        if len(lancamentos) > 1:
+            apontar("Revisar", "Compra #" + str(grupo.id),
+                    "Mais de uma entrada de caixa associada à mesma compra.")
+        recebido_posterior = sum(
+            (Decimal(m.valor or 0)
+             for v in itens for m in recebimentos_por_venda.get(v.id, [])),
+            Decimal("0")
+        )
+        pago_atual = sum((Decimal(v.pago or 0) for v in itens), Decimal("0"))
+        if abs(pago_atual - pago_inicial - recebido_posterior) > CENTAVO:
+            apontar("Alerta", "Compra #" + str(grupo.id),
+                    "Total pago nos itens não concilia com pagamentos e recebimentos.")
+
+    for venda_id, registros in recebimentos_por_venda.items():
+        if venda_id not in por_id:
+            apontar("Alerta", "Fiado #" + str(venda_id),
+                    "Recebimento no caixa sem venda correspondente.")
+
+    # Possível reenvio do mesmo pedido. Apenas sinaliza; nunca exclui.
+    por_cliente_valor = {}
+    for grupo in grupos:
+        if grupo.cliente_id is not None and Decimal(grupo.total or 0) > 0:
+            por_cliente_valor.setdefault(
+                (grupo.cliente_id, Decimal(grupo.total or 0)), []
+            ).append(grupo)
+    for similares in por_cliente_valor.values():
+        similares.sort(key=lambda g: (g.data, g.id))
+        for anterior, seguinte in zip(similares, similares[1:]):
+            if timedelta(0) <= seguinte.data - anterior.data <= timedelta(minutes=2):
+                apontar(
+                    "Revisar", "Compras #" + str(anterior.id) + " e #" + str(seguinte.id),
+                    "Mesmo cliente e valor em menos de 2 minutos; confirme se foram compras distintas."
+                )
+
+    fechamento = db.session.query(
+        db.func.max(FechamentoCaixa.ultima_venda_id),
+        db.func.max(FechamentoCaixa.ultimo_movimento_id)
+    ).one()
+    ultima_venda, ultimo_movimento = fechamento
+    vendas_atuais_lista = [v for v in validas if v.id > (ultima_venda or 0)]
+    movimentos_atuais_lista = [m for m in caixa_todo if m.id > (ultimo_movimento or 0)]
+    vendas_periodo = sum((Decimal(v.total or 0) for v in vendas_atuais_lista), Decimal("0"))
+    lucro_periodo = sum((Decimal(v.lucro or 0) for v in vendas_atuais_lista), Decimal("0"))
+    entradas = sum((Decimal(m.valor or 0) for m in movimentos_atuais_lista
+                    if m.tipo == "entrada"), Decimal("0"))
+    saidas = sum((Decimal(m.valor or 0) for m in movimentos_atuais_lista
+                  if m.tipo == "saida"), Decimal("0"))
+    fiado_geral = sum(
+        (v.saldo_devedor for v in validas if v.tipo == "fiado"),
+        Decimal("0")
+    )
+    despesas = sum(
+        (Decimal(m.valor or 0) for m in movimentos_atuais_lista
+         if eh_despesa_da_loja(m)), Decimal("0")
+    )
+    problemas.sort(key=lambda p: (p["nivel"] != "Alerta", p["origem"]))
+    return pagina("""
+<h1>🔎 Auditoria financeira</h1>
+<p><strong>Conferência de leitura, sem alterar valores.</strong>
+Os cálculos abaixo usam os registros do banco e o último zeramento do caixa.
+A ausência de alertas não substitui a contagem física do dinheiro e do estoque.</p>
+<div class="cards">
+<div class="card"><h3>Vendas registradas (caixa atual)</h3><div class="valor">{{ vendas_periodo|dinheiro }}</div></div>
+<div class="card"><h3>Lucro bruto (caixa atual)</h3><div class="valor">{{ lucro_periodo|dinheiro }}</div></div>
+<div class="card"><h3>Entradas de caixa</h3><div class="valor">{{ entradas|dinheiro }}</div></div>
+<div class="card"><h3>Saídas de caixa</h3><div class="valor despesa">{{ saidas|dinheiro }}</div></div>
+<div class="card"><h3>Saldo por movimentações</h3><div class="valor">{{ (entradas-saidas)|dinheiro }}</div></div>
+<div class="card"><h3>Fiado pendente (todas as datas)</h3><div class="valor">{{ fiado_geral|dinheiro }}</div></div>
+<div class="card"><h3>Despesas da loja (caixa atual)</h3><div class="valor despesa">{{ despesas|dinheiro }}</div></div>
+<div class="card"><h3>Inconsistências / verificações</h3><div class="valor">{{ problemas|length }}</div></div>
+</div>
+<h2>Conciliação e pontos para conferir</h2>
+<p>
+O caixa é a soma das entradas menos as saídas, desde o último zeramento.
+O lucro apresentado é <strong>bruto</strong> e não equivale ao saldo em dinheiro.
+As compras de estoque ficam no caixa, mas seu custo também compõe o lucro
+bruto das mercadorias vendidas: não desconte essas compras duas vezes.
+</p>
+<div class="tabela">
+<table>
+<tr><th>Situação</th><th>Registro</th><th>O que verificar</th></tr>
+{% for problema in problemas[:100] %}
+<tr>
+<td>{{ problema.nivel }}</td>
+<td>{{ problema.origem }}</td>
+<td>{{ problema.mensagem }}</td>
+</tr>
+{% else %}
+<tr><td colspan="3">Nenhuma inconsistência detectada pelas verificações automáticas.</td></tr>
+{% endfor %}
+</table>
+</div>
+{% if problemas|length > 100 %}
+<p>Exibindo 100 de {{ problemas|length }} apontamentos.</p>
+{% endif %}
+<p class="aviso">
+<strong>Atenção:</strong> possíveis compras duplicadas são apenas suspeitas.
+Não apague registros sem conferir comprovantes, pagamento e entrega de mercadorias.
+O custo médio passa a valer nas novas entradas; vendas antigas mantêm o custo
+que estava gravado na época.
+</p>
+<p><a href="/relatorios">Conferir relatórios detalhados</a> · <a href="/caixa">Ver caixa</a></p>
+""",
+        vendas_periodo=vendas_periodo, lucro_periodo=lucro_periodo,
+        entradas=entradas, saidas=saidas, fiado_geral=fiado_geral,
+        despesas=despesas, problemas=problemas)
+
+
 @app.route("/analise-negocio")
 def analise_negocio():
     if not logado():
@@ -2328,6 +2609,11 @@ def analise_negocio():
     por_produto = {}
     por_cliente = {}
     por_dia = {}
+    vinculos_mes = VendaGrupoItem.query.filter(
+        VendaGrupoItem.venda_id.in_([v.id for v in vendas] or [-1])
+    ).all()
+    compra_por_venda = {i.venda_id: i.grupo_id for i in vinculos_mes}
+    compras_ja_contadas = set()
 
     for venda in vendas:
         produto = venda.produto
@@ -2355,7 +2641,13 @@ def analise_negocio():
                 }
             )
             cliente["total"] += Decimal(venda.total or 0)
-            cliente["compras"] += 1
+            chave_compra = (
+                ("grupo", compra_por_venda[venda.id])
+                if venda.id in compra_por_venda else ("avulsa", venda.id)
+            )
+            if chave_compra not in compras_ja_contadas:
+                compras_ja_contadas.add(chave_compra)
+                cliente["compras"] += 1
 
         dia = data_local(venda.data).date()
         por_dia[dia] = por_dia.get(
@@ -2493,7 +2785,7 @@ Vendas excluídas não entram nos resultados.
 <div class="card">
 <h3>🧾 Total vendido</h3>
 <div class="valor">{{ total_vendido|dinheiro }}</div>
-<p>{{ vendas|length }} vendas registradas</p>
+<p>{{ vendas|length }} itens vendidos</p>
 </div>
 
 <div class="card">

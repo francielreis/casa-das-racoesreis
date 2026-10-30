@@ -874,7 +874,8 @@ def entrada():
             flash("Quantidade aceita até 3 casas decimais.", "erro")
             return redirect("/entrada")
 
-        produto = Produto.query.filter_by(id=produto.id).with_for_update().first()
+        produto = (Produto.query.filter_by(id=produto.id)
+                   .with_for_update().populate_existing().first())
         estoque_antigo = Decimal(produto.estoque or 0)
         custo_antigo = Decimal(produto.custo or 0)
         if estoque_antigo < 0:
@@ -1021,8 +1022,8 @@ def venda():
                 quantidade = numero(quantidade_texto)
 
                 if (not quantidade.is_finite() or quantidade <= 0
-                        or quantidade != quantidade.quantize(Decimal("0.001"))
-                        or quantidade > 999999999):
+                        or quantidade > 999999999
+                        or quantidade != quantidade.quantize(Decimal("0.001"))):
                     raise ValueError("Quantidade inválida (máximo 3 casas decimais).")
 
                 quantidades_por_produto[produto_id] = (
@@ -2223,7 +2224,7 @@ Horário do Piauí. Semana de segunda a domingo.
 <div class="card">
 <h3>Vendas no período</h3>
 <div class="valor">{{ total|dinheiro }}</div>
-<p>{{ vendas|length }} vendas</p>
+<p>{{ vendas|length }} itens vendidos</p>
 </div>
 <div class="card">
 <h3>Lucro bruto das vendas</h3>
@@ -2784,7 +2785,7 @@ Vendas excluídas não entram nos resultados.
 <div class="card">
 <h3>🧾 Total vendido</h3>
 <div class="valor">{{ total_vendido|dinheiro }}</div>
-<p>{{ vendas|length }} vendas registradas</p>
+<p>{{ vendas|length }} itens vendidos</p>
 </div>
 
 <div class="card">

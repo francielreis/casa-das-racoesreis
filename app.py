@@ -2365,6 +2365,199 @@ mesmo quando o preço ou custo do produto muda depois.
     )
 
 
+
+@app.route("/auditoria-financeira")
+def auditoria_financeira():
+    """Conciliação somente leitura; nunca corrige valores automaticamente."""
+    if not logado():
+        return redirect("/login")
+
+    vendas_todas = Venda.query.order_by(Venda.id).all()
+    exclusoes = {e.venda_id for e in ExclusaoVenda.query.all()}
+    validas = [v for v in vendas_todas if v.id not in exclusoes]
+    por_id = {v.id: v for v in vendas_todas}
+    grupos = VendaGrupo.query.order_by(VendaGrupo.id).all()
+    vinculos = VendaGrupoItem.query.order_by(VendaGrupoItem.id).all()
+    caixa_todo = Caixa.query.order_by(Caixa.id).all()
+    produtos = Produto.query.all()
+    vinculos_por_grupo = {}
+    for item in vinculos:
+        vinculos_por_grupo.setdefault(item.grupo_id, []).append(item.venda_id)
+
+    movimentos_por_compra = {}
+    recebimentos_por_venda = {}
+    for m in caixa_todo:
+        descricao = m.descricao or ""
+        if m.tipo == "entrada" and descricao.startswith("Compra #"):
+            try:
+                compra_id = int(descricao.split(" - ", 1)[0][8:])
+                movimentos_por_compra.setdefault(compra_id, []).append(m)
+            except (ValueError, IndexError):
+                pass
+        if m.tipo == "entrada" and descricao.startswith("Pagamento de fiado - Venda #"):
+            try:
+                venda_id = int(descricao.rsplit("#", 1)[1])
+                recebimentos_por_venda.setdefault(venda_id, []).append(m)
+            except (ValueError, IndexError):
+                pass
+
+    problemas = []
+    def apontar(nivel, origem, mensagem):
+        problemas.append({"nivel": nivel, "origem": origem, "mensagem": mensagem})
+
+    for v in vendas_todas:
+        qtd = Decimal(v.quantidade or 0)
+        preco = Decimal(v.preco_unitario or 0)
+        custo = Decimal(v.custo_unitario or 0)
+        total = Decimal(v.total or 0)
+        lucro = Decimal(v.lucro or 0)
+        pago = Decimal(v.pago or 0)
+        if qtd <= 0 or total < 0 or pago < 0 or pago > total:
+            apontar("Alerta", "Venda #" + str(v.id),
+                    "Quantidade, total ou pagamento fora dos limites.")
+        if abs(total - dinheiro_decimal(qtd * preco)) > CENTAVO:
+            apontar("Alerta", "Venda #" + str(v.id),
+                    "Total gravado diferente da quantidade × preço unitário.")
+        lucro_esperado = total - dinheiro_decimal(qtd * custo)
+        if abs(lucro - lucro_esperado) > CENTAVO:
+            apontar("Alerta", "Venda #" + str(v.id),
+                    "Lucro gravado diferente de total menos custo da mercadoria.")
+
+    for m in caixa_todo:
+        valor = Decimal(m.valor or 0)
+        if m.tipo not in ("entrada", "saida") or not valor_monetario_valido(valor):
+            apontar("Alerta", "Caixa #" + str(m.id),
+                    "Movimento com tipo ou valor inconsistente.")
+
+    for p in produtos:
+        if Decimal(p.estoque or 0) < 0:
+            apontar("Alerta", "Produto #" + str(p.id),
+                    "Estoque negativo: " + p.nome)
+
+    for grupo in grupos:
+        ids = vinculos_por_grupo.get(grupo.id, [])
+        itens = [por_id[i] for i in ids if i in por_id]
+        if len(itens) != len(ids) or not itens:
+            apontar("Alerta", "Compra #" + str(grupo.id),
+                    "Compra sem todos os itens associados.")
+        total_itens = sum((Decimal(v.total or 0) for v in itens), Decimal("0"))
+        if abs(total_itens - Decimal(grupo.total or 0)) > CENTAVO:
+            apontar("Alerta", "Compra #" + str(grupo.id),
+                    "Total do pedido diferente da soma de seus itens.")
+        lancamentos = movimentos_por_compra.get(grupo.id, [])
+        pago_inicial = Decimal(grupo.pago or 0)
+        valor_caixa = sum((Decimal(m.valor or 0) for m in lancamentos), Decimal("0"))
+        if abs(valor_caixa - pago_inicial) > CENTAVO:
+            apontar("Alerta", "Compra #" + str(grupo.id),
+                    "Entrada inicial no caixa diferente do pagamento da compra.")
+        if len(lancamentos) > 1:
+            apontar("Revisar", "Compra #" + str(grupo.id),
+                    "Mais de uma entrada de caixa associada à mesma compra.")
+        recebido_posterior = sum(
+            (Decimal(m.valor or 0)
+             for v in itens for m in recebimentos_por_venda.get(v.id, [])),
+            Decimal("0")
+        )
+        pago_atual = sum((Decimal(v.pago or 0) for v in itens), Decimal("0"))
+        if abs(pago_atual - pago_inicial - recebido_posterior) > CENTAVO:
+            apontar("Alerta", "Compra #" + str(grupo.id),
+                    "Total pago nos itens não concilia com pagamentos e recebimentos.")
+
+    for venda_id, registros in recebimentos_por_venda.items():
+        if venda_id not in por_id:
+            apontar("Alerta", "Fiado #" + str(venda_id),
+                    "Recebimento no caixa sem venda correspondente.")
+
+    # Possível reenvio do mesmo pedido. Apenas sinaliza; nunca exclui.
+    por_cliente_valor = {}
+    for grupo in grupos:
+        if grupo.cliente_id is not None and Decimal(grupo.total or 0) > 0:
+            por_cliente_valor.setdefault(
+                (grupo.cliente_id, Decimal(grupo.total or 0)), []
+            ).append(grupo)
+    for similares in por_cliente_valor.values():
+        similares.sort(key=lambda g: (g.data, g.id))
+        for anterior, seguinte in zip(similares, similares[1:]):
+            if timedelta(0) <= seguinte.data - anterior.data <= timedelta(minutes=2):
+                apontar(
+                    "Revisar", "Compras #" + str(anterior.id) + " e #" + str(seguinte.id),
+                    "Mesmo cliente e valor em menos de 2 minutos; confirme se foram compras distintas."
+                )
+
+    fechamento = db.session.query(
+        db.func.max(FechamentoCaixa.ultima_venda_id),
+        db.func.max(FechamentoCaixa.ultimo_movimento_id)
+    ).one()
+    ultima_venda, ultimo_movimento = fechamento
+    vendas_atuais_lista = [v for v in validas if v.id > (ultima_venda or 0)]
+    movimentos_atuais_lista = [m for m in caixa_todo if m.id > (ultimo_movimento or 0)]
+    vendas_periodo = sum((Decimal(v.total or 0) for v in vendas_atuais_lista), Decimal("0"))
+    lucro_periodo = sum((Decimal(v.lucro or 0) for v in vendas_atuais_lista), Decimal("0"))
+    entradas = sum((Decimal(m.valor or 0) for m in movimentos_atuais_lista
+                    if m.tipo == "entrada"), Decimal("0"))
+    saidas = sum((Decimal(m.valor or 0) for m in movimentos_atuais_lista
+                  if m.tipo == "saida"), Decimal("0"))
+    fiado_geral = sum(
+        (v.saldo_devedor for v in validas if v.tipo == "fiado"),
+        Decimal("0")
+    )
+    despesas = sum(
+        (Decimal(m.valor or 0) for m in movimentos_atuais_lista
+         if eh_despesa_da_loja(m)), Decimal("0")
+    )
+    problemas.sort(key=lambda p: (p["nivel"] != "Alerta", p["origem"]))
+    return pagina("""
+<h1>🔎 Auditoria financeira</h1>
+<p><strong>Conferência de leitura, sem alterar valores.</strong>
+Os cálculos abaixo usam os registros do banco e o último zeramento do caixa.
+A ausência de alertas não substitui a contagem física do dinheiro e do estoque.</p>
+<div class="cards">
+<div class="card"><h3>Vendas registradas (caixa atual)</h3><div class="valor">{{ vendas_periodo|dinheiro }}</div></div>
+<div class="card"><h3>Lucro bruto (caixa atual)</h3><div class="valor">{{ lucro_periodo|dinheiro }}</div></div>
+<div class="card"><h3>Entradas de caixa</h3><div class="valor">{{ entradas|dinheiro }}</div></div>
+<div class="card"><h3>Saídas de caixa</h3><div class="valor despesa">{{ saidas|dinheiro }}</div></div>
+<div class="card"><h3>Saldo por movimentações</h3><div class="valor">{{ (entradas-saidas)|dinheiro }}</div></div>
+<div class="card"><h3>Fiado pendente (todas as datas)</h3><div class="valor">{{ fiado_geral|dinheiro }}</div></div>
+<div class="card"><h3>Despesas da loja (caixa atual)</h3><div class="valor despesa">{{ despesas|dinheiro }}</div></div>
+<div class="card"><h3>Inconsistências / verificações</h3><div class="valor">{{ problemas|length }}</div></div>
+</div>
+<h2>Conciliação e pontos para conferir</h2>
+<p>
+O caixa é a soma das entradas menos as saídas, desde o último zeramento.
+O lucro apresentado é <strong>bruto</strong> e não equivale ao saldo em dinheiro.
+As compras de estoque ficam no caixa, mas seu custo também compõe o lucro
+bruto das mercadorias vendidas: não desconte essas compras duas vezes.
+</p>
+<div class="tabela">
+<table>
+<tr><th>Situação</th><th>Registro</th><th>O que verificar</th></tr>
+{% for problema in problemas[:100] %}
+<tr>
+<td>{{ problema.nivel }}</td>
+<td>{{ problema.origem }}</td>
+<td>{{ problema.mensagem }}</td>
+</tr>
+{% else %}
+<tr><td colspan="3">Nenhuma inconsistência detectada pelas verificações automáticas.</td></tr>
+{% endfor %}
+</table>
+</div>
+{% if problemas|length > 100 %}
+<p>Exibindo 100 de {{ problemas|length }} apontamentos.</p>
+{% endif %}
+<p class="aviso">
+<strong>Atenção:</strong> possíveis compras duplicadas são apenas suspeitas.
+Não apague registros sem conferir comprovantes, pagamento e entrega de mercadorias.
+O custo médio passa a valer nas novas entradas; vendas antigas mantêm o custo
+que estava gravado na época.
+</p>
+<p><a href="/relatorios">Conferir relatórios detalhados</a> · <a href="/caixa">Ver caixa</a></p>
+""",
+        vendas_periodo=vendas_periodo, lucro_periodo=lucro_periodo,
+        entradas=entradas, saidas=saidas, fiado_geral=fiado_geral,
+        despesas=despesas, problemas=problemas)
+
+
 @app.route("/analise-negocio")
 def analise_negocio():
     if not logado():

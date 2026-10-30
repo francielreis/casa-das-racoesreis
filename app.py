@@ -8,7 +8,7 @@ from urllib.parse import urlencode
 
 from flask import (
     Flask, request, redirect, session, flash,
-    render_template_string, Response, send_from_directory
+    render_template_string, Response, send_from_directory, url_for
 )
 from flask_sqlalchemy import SQLAlchemy
 from markupsafe import Markup
@@ -249,6 +249,17 @@ def dinheiro(valor):
 app.jinja_env.filters["dinheiro"] = dinheiro
 
 
+def quantidade_legivel(valor):
+    """Exibe 1 em vez de 1.000, preservando frações como 0,5."""
+    texto = format(Decimal(valor or 0), "f")
+    if "." in texto:
+        texto = texto.rstrip("0").rstrip(".")
+    return texto.replace(".", ",")
+
+
+app.jinja_env.filters["quantidade_legivel"] = quantidade_legivel
+
+
 def logado():
     return session.get("logado") is True
 
@@ -339,6 +350,34 @@ th{background:#e9eceb}
 h1{color:#176b3a}
 .tabela{overflow-x:auto}
 .aviso{background:#fff3cd;padding:12px;border-radius:6px}
+/* Compras agrupadas: leitura confortável em telas pequenas. */
+.compras-ajuda{color:#5a645f;margin:-4px 0 16px;line-height:1.5}
+.lista-compras{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px}
+.compra-card{background:#fff;border:1px solid #e0e6e2;border-radius:14px;overflow:hidden;box-shadow:0 2px 8px #0000000b}
+.compra-topo{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;padding:16px}
+.compra-cliente{font-size:18px;font-weight:700;overflow-wrap:anywhere;margin:6px 0}
+.compra-data{font-size:13px;color:#606a63}
+.compra-numero{color:#176b3a;font-size:12px;font-weight:700}
+.compra-situacao{background:#edf5ef;color:#176b3a;padding:7px 9px;border-radius:8px;font-weight:700;font-size:12px;white-space:nowrap}
+.compra-situacao.fiado{background:#fff2dc;color:#8a4e0b}
+.compra-itens{list-style:none;padding:0 16px;margin:0}
+.compra-item{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:12px 0;border-top:1px solid #edf0ed}
+.compra-item-nome{font-weight:700;display:block;overflow-wrap:anywhere}
+.compra-item-dados{font-size:12px;color:#636c65;display:block;line-height:1.6;margin-top:3px}
+.compra-item-total{font-weight:700;text-align:right;white-space:nowrap}
+.compra-rodape{padding:13px 16px 16px;background:#f7f9f7;border-top:1px solid #e6ece7}
+.compra-totais{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.compra-totais small{color:#606a63;display:block;margin-bottom:5px}
+.compra-totais strong{font-size:18px;display:block;white-space:nowrap}
+.compra-totais .lucro{color:#176b3a}
+.compra-ver{display:block;text-align:center;color:#176b3a;text-decoration:none;border:1px solid #98b8a3;background:#fff;font-weight:700;border-radius:8px;padding:11px;margin-top:14px}
+.compra-ver:focus-visible{outline:3px solid #176b3a;outline-offset:2px}
+.compra-vazia{background:#fff;border-radius:12px;padding:20px}
+@media(max-width:540px){
+ .lista-compras{grid-template-columns:1fr}
+ .compra-card{border-radius:11px}
+ .compra-totais strong{font-size:16px}
+}
 </style>
 </head>
 <body>
@@ -471,7 +510,35 @@ def painel():
     baixos = Produto.query.filter(
         Produto.estoque <= Produto.estoque_minimo
     ).all()
-    ultimas = vendas_atuais().order_by(Venda.id.desc()).limit(10).all()
+    # Reune os itens pela compra original. Vendas antigas sem grupo
+    # continuam aparecendo individualmente, sem inferir ligacoes por horario.
+    ultimas_por_chave = {}
+    linhas_agrupadas = (
+        vendas_atuais()
+        .outerjoin(VendaGrupoItem, VendaGrupoItem.venda_id == Venda.id)
+        .with_entities(Venda, VendaGrupoItem.grupo_id)
+        .order_by(Venda.id.desc())
+        .all()
+    )
+    for venda, grupo_id in linhas_agrupadas:
+        chave = ("compra", grupo_id) if grupo_id is not None else ("venda", venda.id)
+        if chave not in ultimas_por_chave:
+            ultimas_por_chave[chave] = {
+                "data": venda.data,
+                "cliente": venda.cliente.nome if venda.cliente else "Sem cliente",
+                "grupo_id": grupo_id,
+                "tipo": venda.tipo,
+                "itens": [],
+                "total": Decimal("0"),
+                "lucro": Decimal("0"),
+            }
+        resumo = ultimas_por_chave[chave]
+        resumo["itens"].append(venda)
+        resumo["total"] += Decimal(venda.total or 0)
+        resumo["lucro"] += Decimal(venda.lucro or 0)
+    ultimas = list(ultimas_por_chave.values())[:10]
+    for resumo in ultimas:
+        resumo["itens"].reverse()
 
     return pagina("""
 <h1>Painel</h1>
@@ -546,36 +613,45 @@ def painel():
 </table>
 </div>
 
-<h2>Últimas vendas</h2>
-<div class="tabela">
-<table>
-<tr>
-<th>Horário</th>
-<th>Cliente</th>
-<th>Produto</th>
-<th>Total</th>
-<th>Lucro</th>
-<th>Pagamento</th>
-</tr>
-{% for venda in ultimas %}
-<tr>
-<td>
-{{ (venda.data|data_local).strftime("%d/%m %H:%M") }}
-</td>
-<td>
-{{ venda.cliente.nome if venda.cliente else "Sem cliente" }}
-</td>
-<td>{{ venda.produto.nome }}</td>
-<td>{{ venda.total|dinheiro }}</td>
-<td>{{ venda.lucro|dinheiro }}</td>
-<td>{{ "Fiado" if venda.tipo == "fiado" else "À vista" }}</td>
-</tr>
-{% else %}
-<tr>
-<td colspan="6">Nenhuma venda registrada.</td>
-</tr>
+<h2>Últimas compras</h2>
+<p class="compras-ajuda">Cada compra aparece uma vez, com todos os itens realmente registrados no sistema. Toque em "Ver detalhes" para conferir.</p>
+<div class="lista-compras">
+{% for compra in ultimas %}
+<article class="compra-card">
+<div class="compra-topo">
+<div>
+<span class="compra-numero">{% if compra.grupo_id is not none %}COMPRA #{{ compra.grupo_id }}{% else %}VENDA AVULSA{% endif %} · {{ compra.itens|length }} item(ns)</span>
+<div class="compra-cliente">{{ compra.cliente }}</div>
+<time class="compra-data">{{ (compra.data|data_local).strftime("%d/%m/%Y às %H:%M") }}</time>
+</div>
+<span class="compra-situacao {{ 'fiado' if compra.tipo == 'fiado' else '' }}">{{ "Fiado" if compra.tipo == "fiado" else "À vista" }}</span>
+</div>
+<ul class="compra-itens">
+{% for item in compra.itens %}
+<li class="compra-item">
+<div>
+<span class="compra-item-nome">{{ item.produto.nome }}</span>
+<span class="compra-item-dados">{{ item.quantidade|quantidade_legivel }} {{ item.produto.unidade }} × {{ item.preco_unitario|dinheiro }}</span>
+</div>
+<span class="compra-item-total">{{ item.total|dinheiro }}</span>
+</li>
 {% endfor %}
-</table>
+</ul>
+<div class="compra-rodape">
+<div class="compra-totais">
+<div><small>Total da compra</small><strong>{{ compra.total|dinheiro }}</strong></div>
+<div><small>Lucro bruto</small><strong class="lucro">{{ compra.lucro|dinheiro }}</strong></div>
+</div>
+{% if compra.grupo_id is not none %}
+<a class="compra-ver" href="{{ url_for('detalhe_compra', grupo_id=compra.grupo_id) }}">Ver detalhes da compra</a>
+{% else %}
+<a class="compra-ver" href="{{ url_for('listar_vendas') }}">Consultar vendas antigas</a>
+{% endif %}
+</div>
+</article>
+{% else %}
+<div class="compra-vazia">Nenhuma venda registrada neste caixa. <a href="/venda">Registrar uma venda</a>.</div>
+{% endfor %}
 </div>
 """,
         saldo=saldo,
@@ -1100,6 +1176,7 @@ Adicione todos os produtos que o cliente comprou e finalize uma única compra.
 <div class="item-venda" style="border:1px solid #ddd;border-radius:9px;padding:12px;margin-bottom:12px">
 <label>Produto</label>
 <select name="produto" class="produto-venda" required>
+<option value="" selected disabled>Selecione o produto</option>
 {% for produto in produtos %}
 <option value="{{ produto.id }}"
         data-preco="{{ produto.preco }}"
@@ -1176,6 +1253,7 @@ Se for um novo cliente, deixe “Cliente cadastrado” em Nenhum.
 <div class="item-venda" style="border:1px solid #ddd;border-radius:9px;padding:12px;margin-bottom:12px">
 <label>Produto</label>
 <select name="produto" class="produto-venda" required>
+<option value="" selected disabled>Selecione o produto</option>
 {% for produto in produtos %}
 <option value="{{ produto.id }}"
         data-preco="{{ produto.preco }}"
@@ -1263,6 +1341,51 @@ Remover produto
         atualizar();
     });
 
+    // Confirma a lista completa antes de gravar: evita trocar um item
+    // por outro inadvertidamente e não altera movimentos já lançados.
+    document.getElementById("form-venda").addEventListener("submit", (evento)=>{
+        const linhas = Array.from(itens.querySelectorAll(".item-venda"));
+        const ids = [];
+        const resumo = [];
+        let valor = 0;
+        for (const linha of linhas){
+            const select = linha.querySelector(".produto-venda");
+            const quantidade = Number(linha.querySelector(".quantidade-venda").value);
+            const opcao = select.options[select.selectedIndex];
+            if (!opcao || !select.value || !Number.isFinite(quantidade) || quantidade <= 0){
+                evento.preventDefault();
+                return;
+            }
+            const preco = Number(opcao.dataset.preco || 0);
+            const nome = opcao.textContent.split("|")[0].trim();
+            const unidade = opcao.dataset.unidade || "un";
+            ids.push(select.value);
+            resumo.push(nome + " — " + quantidade.toLocaleString("pt-BR") +
+                " " + unidade + " — " + moeda(preco * quantidade));
+            valor += preco * quantidade;
+        }
+        const clienteSelecionado = document.getElementById("cliente");
+        const nomeNovo = document.getElementById("novo_cliente_nome").value.trim();
+        const cliente = nomeNovo || clienteSelecionado.options[clienteSelecionado.selectedIndex].textContent.trim();
+        const repetido = ids.length !== new Set(ids).size;
+        const aviso = repetido ?
+            "\nATENÇÃO: o mesmo produto está repetido e as quantidades serão somadas.\n" : "";
+        const mensagem = "CONFIRA ANTES DE FINALIZAR\n\nCliente: " + cliente +
+            "\n\n" + resumo.join("\n") + "\n\nTOTAL: " + moeda(valor) +
+            "\nPagamento: " + (tipo.value === "fiado" ? "Fiado" : "À vista") +
+            aviso + "\n\nOs produtos e as quantidades estão corretos?";
+        if (!window.confirm(mensagem)){
+            evento.preventDefault();
+            return;
+        }
+        // Impede toque duplo e dois lançamentos acidentais.
+        const botao = evento.currentTarget.querySelector('button[type="submit"]');
+        if (botao) {
+            botao.disabled = true;
+            botao.textContent = "Registrando compra...";
+        }
+    });
+
     tipo.addEventListener("change", atualizar);
     atualizar();
 })();
@@ -1307,53 +1430,50 @@ def detalhe_compra(grupo_id):
 
     return pagina("""
 <h1>Compra #{{ grupo.id }}</h1>
-<p>
-<strong>Data:</strong>
-{{ (grupo.data|data_local).strftime("%d/%m/%Y %H:%M") }}<br>
-<strong>Cliente:</strong>
-{{ grupo.cliente.nome if grupo.cliente else "Sem cliente" }}<br>
-<strong>Tipo:</strong>
-{{ "Fiado" if grupo.tipo == "fiado" else "À vista" }}
-</p>
-
-<div class="tabela">
-<table>
-<tr>
-<th>Produto</th>
-<th>Quantidade</th>
-<th>Preço unitário</th>
-<th>Subtotal</th>
-<th>Lucro</th>
-</tr>
-{% for venda in itens %}
-<tr>
-<td>{{ venda.produto.nome }}</td>
-<td>{{ venda.quantidade }} {{ venda.produto.unidade }}</td>
-<td>{{ venda.preco_unitario|dinheiro }}</td>
-<td>{{ venda.total|dinheiro }}</td>
-<td>{{ venda.lucro|dinheiro }}</td>
-</tr>
-{% else %}
-<tr><td colspan="5">Todos os itens desta compra foram excluídos.</td></tr>
-{% endfor %}
-<tfoot>
-<tr>
-<th colspan="3">TOTAL</th>
-<th>{{ total_atual|dinheiro }}</th>
-<th>{{ lucro_atual|dinheiro }}</th>
-</tr>
-</tfoot>
-</table>
+<p class="compras-ajuda">Confira cada produto registrado nessa compra.</p>
+<div class="compra-card" style="max-width:720px">
+<div class="compra-topo">
+<div>
+<div class="compra-cliente">{{ grupo.cliente.nome if grupo.cliente else "Sem cliente" }}</div>
+<time class="compra-data">{{ (grupo.data|data_local).strftime("%d/%m/%Y às %H:%M") }}</time>
 </div>
-
-<p>
-<strong>Pago no momento da compra:</strong> {{ grupo.pago|dinheiro }}
-</p>
-
+<span class="compra-situacao {{ 'fiado' if grupo.tipo == 'fiado' else '' }}">{{ "Fiado" if grupo.tipo == "fiado" else "À vista" }}</span>
+</div>
+<ul class="compra-itens">
+{% for venda in itens %}
+<li class="compra-item">
+<div>
+<span class="compra-item-nome">{{ venda.produto.nome }}</span>
+<span class="compra-item-dados">{{ venda.quantidade|quantidade_legivel }} {{ venda.produto.unidade }} × {{ venda.preco_unitario|dinheiro }}</span>
+</div>
+<div style="text-align:right">
+<span class="compra-item-total">{{ venda.total|dinheiro }}</span>
+<span class="compra-item-dados">Lucro: {{ venda.lucro|dinheiro }}</span>
+</div>
+</li>
+{% else %}
+<li class="compra-item">Nenhum item ativo nesta compra.</li>
+{% endfor %}
+</ul>
+<div class="compra-rodape">
+<div class="compra-totais">
+<div><small>Total registrado</small><strong>{{ total_atual|dinheiro }}</strong></div>
+<div><small>Lucro bruto registrado</small><strong class="lucro">{{ lucro_atual|dinheiro }}</strong></div>
+</div>
+<p style="margin:14px 0 0"><small>Pago no momento do registro: {{ grupo.pago|dinheiro }}</small></p>
+</div>
+</div>
+<div class="aviso" style="max-width:720px;margin-top:16px">
+Se algum produto não aparece nesta lista, ele não consta entre os itens ativos
+desta compra. Confira o histórico antes de registrar novamente, para não duplicar
+estoque, caixa ou vendas.
+</div>
 <p>
 <a href="/venda">+ Nova venda</a>
 &nbsp;•&nbsp;
-<a href="/vendas">Ver vendas</a>
+<a href="/vendas">Ver todas as vendas</a>
+&nbsp;•&nbsp;
+<a href="/">Voltar ao painel</a>
 </p>
 """,
         grupo=grupo,

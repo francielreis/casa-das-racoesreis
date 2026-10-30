@@ -1131,6 +1131,7 @@ Adicione todos os produtos que o cliente comprou e finalize uma única compra.
 <div class="item-venda" style="border:1px solid #ddd;border-radius:9px;padding:12px;margin-bottom:12px">
 <label>Produto</label>
 <select name="produto" class="produto-venda" required>
+<option value="" selected disabled>Selecione o produto</option>
 {% for produto in produtos %}
 <option value="{{ produto.id }}"
         data-preco="{{ produto.preco }}"
@@ -1207,6 +1208,7 @@ Se for um novo cliente, deixe “Cliente cadastrado” em Nenhum.
 <div class="item-venda" style="border:1px solid #ddd;border-radius:9px;padding:12px;margin-bottom:12px">
 <label>Produto</label>
 <select name="produto" class="produto-venda" required>
+<option value="" selected disabled>Selecione o produto</option>
 {% for produto in produtos %}
 <option value="{{ produto.id }}"
         data-preco="{{ produto.preco }}"
@@ -1292,6 +1294,18 @@ Remover produto
         itens.appendChild(fragmento);
         preparar(linha);
         atualizar();
+    });
+
+    // Se o mesmo produto aparecer em mais de uma linha, avisa antes
+    // de finalizar: o backend junta quantidades iguais na mesma compra.
+    document.getElementById("form-venda").addEventListener("submit", (evento)=>{
+        const ids = Array.from(
+            itens.querySelectorAll(".produto-venda")
+        ).map((select)=>select.value);
+        if (ids.length !== new Set(ids).size &&
+            !window.confirm("O mesmo produto foi selecionado duas vezes. Deseja continuar?")) {
+            evento.preventDefault();
+        }
     });
 
     tipo.addEventListener("change", atualizar);

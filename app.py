@@ -697,14 +697,26 @@ def produtos():
         return redirect("/login")
 
     if request.method == "POST":
+        custo = numero(request.form.get("custo", ""))
+        preco = numero(request.form.get("preco", ""))
+        estoque = numero(request.form.get("estoque", "0"))
+        minimo = numero(request.form.get("estoque_minimo", "0"))
+        if not all((
+            valor_monetario_valido(custo, permite_zero=True),
+            valor_monetario_valido(preco, permite_zero=True),
+            estoque.is_finite() and 0 <= estoque <= 999999999,
+            minimo.is_finite() and 0 <= minimo <= 999999999
+        )):
+            flash("Confira preços, custos e estoque: não são aceitos valores negativos ou inválidos.", "erro")
+            return redirect("/produtos")
         produto = Produto(
             nome=request.form["nome"],
             categoria=request.form.get("categoria", ""),
             unidade=request.form["unidade"],
-            custo=numero(request.form["custo"]),
-            preco=numero(request.form["preco"]),
-            estoque=numero(request.form["estoque"]),
-            estoque_minimo=numero(request.form["estoque_minimo"])
+            custo=custo,
+            preco=preco,
+            estoque=estoque,
+            estoque_minimo=minimo
         )
         db.session.add(produto)
         db.session.commit()
@@ -858,6 +870,9 @@ def entrada():
         if not valor_monetario_valido(custo):
             flash("Custo inválido: use valor positivo com até 2 casas decimais.", "erro")
             return redirect("/entrada")
+        if quantidade != quantidade.quantize(Decimal("0.001")):
+            flash("Quantidade aceita até 3 casas decimais.", "erro")
+            return redirect("/entrada")
 
         produto = Produto.query.filter_by(id=produto.id).with_for_update().first()
         estoque_antigo = Decimal(produto.estoque or 0)
@@ -1005,8 +1020,10 @@ def venda():
                 produto_id = int(produto_id_texto)
                 quantidade = numero(quantidade_texto)
 
-                if not quantidade.is_finite() or quantidade <= 0:
-                    raise ValueError("Quantidade inválida.")
+                if (not quantidade.is_finite() or quantidade <= 0
+                        or quantidade != quantidade.quantize(Decimal("0.001"))
+                        or quantidade > 999999999):
+                    raise ValueError("Quantidade inválida (máximo 3 casas decimais).")
 
                 quantidades_por_produto[produto_id] = (
                     quantidades_por_produto.get(
@@ -2398,6 +2415,11 @@ def analise_negocio():
     por_produto = {}
     por_cliente = {}
     por_dia = {}
+    vinculos_mes = VendaGrupoItem.query.filter(
+        VendaGrupoItem.venda_id.in_([v.id for v in vendas] or [-1])
+    ).all()
+    compra_por_venda = {i.venda_id: i.grupo_id for i in vinculos_mes}
+    compras_ja_contadas = set()
 
     for venda in vendas:
         produto = venda.produto
@@ -2425,7 +2447,13 @@ def analise_negocio():
                 }
             )
             cliente["total"] += Decimal(venda.total or 0)
-            cliente["compras"] += 1
+            chave_compra = (
+                ("grupo", compra_por_venda[venda.id])
+                if venda.id in compra_por_venda else ("avulsa", venda.id)
+            )
+            if chave_compra not in compras_ja_contadas:
+                compras_ja_contadas.add(chave_compra)
+                cliente["compras"] += 1
 
         dia = data_local(venda.data).date()
         por_dia[dia] = por_dia.get(

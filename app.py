@@ -972,6 +972,15 @@ def venda():
     clientes = Cliente.query.order_by(Cliente.nome).all()
 
     if request.method == "POST":
+        chave_requisicao = request.form.get("chave_requisicao", "").strip()
+        if not chave_requisicao or len(chave_requisicao) > 100:
+            flash("Formulário inválido. Abra a tela de venda novamente.", "erro")
+            return redirect("/venda")
+        pedido_existente = db.session.get(VendaRequisicao, chave_requisicao)
+        if pedido_existente:
+            flash("Esta compra já está registrada. Nenhuma duplicação foi feita.", "sucesso")
+            return redirect(url_for("detalhe_compra", grupo_id=pedido_existente.grupo_id))
+
         produto_ids = request.form.getlist("produto")
         quantidades_texto = request.form.getlist("quantidade")
         tipo = request.form.get("tipo", "")
@@ -1070,8 +1079,14 @@ def venda():
 
                 preco = Decimal(produto.preco or 0)
                 custo = Decimal(produto.custo or 0)
-                subtotal = preco * quantidade
-                lucro = (preco - custo) * quantidade
+                if not (
+                    valor_monetario_valido(preco, permite_zero=True)
+                    and valor_monetario_valido(custo, permite_zero=True)
+                ):
+                    raise ValueError("Preço ou custo inválido para esse produto.")
+                subtotal = dinheiro_decimal(preco * quantidade)
+                custo_total = dinheiro_decimal(custo * quantidade)
+                lucro = subtotal - custo_total
                 total_geral += subtotal
 
                 itens.append({
@@ -1095,8 +1110,7 @@ def venda():
                     raise ValueError("Informe um pagamento válido.")
 
                 if (
-                    not pago_total.is_finite()
-                    or pago_total < 0
+                    not valor_monetario_valido(pago_total, permite_zero=True)
                     or pago_total > total_geral
                 ):
                     raise ValueError(
@@ -1158,6 +1172,12 @@ def venda():
                     venda_id=nova_venda.id
                 ))
 
+            # Unicidade imposta no PostgreSQL para impedir pedidos repetidos.
+            db.session.add(VendaRequisicao(
+                chave=chave_requisicao, grupo_id=grupo.id
+            ))
+            db.session.flush()
+
             if pago_total > 0:
                 nome_cliente = (
                     db.session.get(Cliente, cliente_id).nome
@@ -1189,6 +1209,15 @@ def venda():
             db.session.rollback()
             flash(str(erro), "erro")
             return redirect("/venda")
+        except IntegrityError:
+            db.session.rollback()
+            pedido_existente = db.session.get(VendaRequisicao, chave_requisicao)
+            if pedido_existente:
+                flash("Compra já registrada; duplicação bloqueada.", "sucesso")
+                return redirect(url_for("detalhe_compra", grupo_id=pedido_existente.grupo_id))
+            app.logger.exception("Falha de integridade ao salvar compra")
+            flash("Compra não registrada. Confira o histórico.", "erro")
+            return redirect("/venda")
         except Exception:
             db.session.rollback()
             app.logger.exception("Falha ao registrar compra com vários itens")
@@ -1205,6 +1234,7 @@ Adicione todos os produtos que o cliente comprou e finalize uma única compra.
 </p>
 
 <form method="post" id="form-venda">
+<input type="hidden" name="chave_requisicao" value="{{ chave_requisicao }}">
 <div class="formulario" style="max-width:850px">
 <h2>Itens da compra</h2>
 
@@ -1426,7 +1456,8 @@ Remover produto
     atualizar();
 })();
 </script>
-""", produtos=produtos, clientes=clientes)
+""", produtos=produtos, clientes=clientes,
+        chave_requisicao=secrets.token_urlsafe(32))
 
 
 @app.route("/vendas/compra/<int:grupo_id>")
@@ -1675,14 +1706,14 @@ def receber(venda_id):
         return redirect("/fiado")
     valor = numero(request.form["valor"])
 
-    if valor <= 0:
-        flash("Valor inválido.", "erro")
+    if not valor_monetario_valido(valor):
+        flash("Informe um pagamento positivo, com até 2 casas decimais.", "erro")
         return redirect("/fiado")
 
     saldo = venda.saldo_devedor
-
     if valor > saldo:
-        valor = saldo
+        flash("Pagamento superior ao saldo devedor. Confira o valor.", "erro")
+        return redirect("/fiado")
 
     venda.pago = Decimal(venda.pago or 0) + valor
 
@@ -1705,7 +1736,10 @@ def caixa():
         tipo = request.form["tipo"]
         valor = numero(request.form["valor"])
 
-        if valor <= 0:
+        if tipo not in ("entrada", "saida"):
+            flash("Tipo de movimentação inválido.", "erro")
+            return redirect("/caixa")
+        if not valor_monetario_valido(valor):
             flash("Valor inválido.", "erro")
             return redirect("/caixa")
 

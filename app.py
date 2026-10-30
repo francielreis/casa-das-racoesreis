@@ -3,7 +3,7 @@ import secrets
 import hmac
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from urllib.parse import urlencode
 
 from flask import (
@@ -11,6 +11,7 @@ from flask import (
     render_template_string, Response, send_from_directory, url_for
 )
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy.exc import IntegrityError
 from markupsafe import Markup
 
 
@@ -163,6 +164,13 @@ class VendaGrupoItem(db.Model):
     venda = db.relationship("Venda")
 
 
+class VendaRequisicao(db.Model):
+    # Chave unica contra repeticao do formulario, inclusive com varios workers.
+    chave = db.Column(db.String(100), primary_key=True)
+    grupo_id = db.Column(db.Integer, db.ForeignKey("venda_grupo.id"), nullable=False)
+    criado_em = db.Column(db.DateTime, nullable=False, default=agora_utc)
+
+
 class Caixa(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     tipo = db.Column(db.String(20), nullable=False)
@@ -247,6 +255,20 @@ def dinheiro(valor):
 
 
 app.jinja_env.filters["dinheiro"] = dinheiro
+
+
+CENTAVO = Decimal("0.01")
+
+
+def dinheiro_decimal(valor):
+    return Decimal(valor).quantize(CENTAVO, rounding=ROUND_HALF_UP)
+
+
+def valor_monetario_valido(valor, permite_zero=False):
+    return (valor.is_finite()
+            and (valor >= 0 if permite_zero else valor > 0)
+            and valor == valor.quantize(CENTAVO)
+            and valor <= Decimal("9999999999.99"))
 
 
 def quantidade_legivel(valor):
@@ -399,6 +421,7 @@ h1{color:#176b3a}
 <a href="/despesas">Despesas</a>
 <a href="/relatorios">Relatórios</a>
 <a href="/analise-negocio">Análise do Negócio</a>
+<a href="/auditoria-financeira">Auditoria financeira</a>
 <a href="/catalogo">Catálogo público</a>
 <a href="/banners">Banners</a>
 <a href="/logout">Sair</a>
@@ -829,12 +852,25 @@ def entrada():
             flash("Produto não encontrado.", "erro")
             return redirect("/entrada")
 
-        if quantidade <= 0:
+        if not quantidade.is_finite() or quantidade <= 0 or quantidade > 999999999:
             flash("Quantidade inválida.", "erro")
             return redirect("/entrada")
+        if not valor_monetario_valido(custo):
+            flash("Custo inválido: use valor positivo com até 2 casas decimais.", "erro")
+            return redirect("/entrada")
 
-        produto.estoque = Decimal(produto.estoque or 0) + quantidade
-        produto.custo = custo
+        produto = Produto.query.filter_by(id=produto.id).with_for_update().first()
+        estoque_antigo = Decimal(produto.estoque or 0)
+        custo_antigo = Decimal(produto.custo or 0)
+        if estoque_antigo < 0:
+            flash("Estoque negativo. Confira antes da nova entrada.", "erro")
+            return redirect("/entrada")
+        novo_estoque = estoque_antigo + quantidade
+        # Custo medio ponderado apenas para o estoque futuro.
+        produto.custo = dinheiro_decimal(
+            ((estoque_antigo * custo_antigo) + (quantidade * custo)) / novo_estoque
+        )
+        produto.estoque = novo_estoque
 
         registro = EntradaEstoque(
             produto_id=produto.id,
@@ -844,7 +880,7 @@ def entrada():
         db.session.add(registro)
 
         if request.form.get("registrar_caixa") == "sim":
-            valor_total = quantidade * custo
+            valor_total = dinheiro_decimal(quantidade * custo)
             db.session.add(Caixa(
                 tipo="saida",
                 descricao="Compra de mercadoria - " + produto.nome,

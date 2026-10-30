@@ -471,7 +471,35 @@ def painel():
     baixos = Produto.query.filter(
         Produto.estoque <= Produto.estoque_minimo
     ).all()
-    ultimas = vendas_atuais().order_by(Venda.id.desc()).limit(10).all()
+    # Reune os itens pela compra original. Vendas antigas sem grupo
+    # continuam aparecendo individualmente, sem inferir ligacoes por horario.
+    ultimas_por_chave = {}
+    linhas_agrupadas = (
+        vendas_atuais()
+        .outerjoin(VendaGrupoItem, VendaGrupoItem.venda_id == Venda.id)
+        .with_entities(Venda, VendaGrupoItem.grupo_id)
+        .order_by(Venda.id.desc())
+        .all()
+    )
+    for venda, grupo_id in linhas_agrupadas:
+        chave = ("compra", grupo_id) if grupo_id is not None else ("venda", venda.id)
+        if chave not in ultimas_por_chave:
+            ultimas_por_chave[chave] = {
+                "data": venda.data,
+                "cliente": venda.cliente.nome if venda.cliente else "Sem cliente",
+                "grupo_id": grupo_id,
+                "tipo": venda.tipo,
+                "itens": [],
+                "total": Decimal("0"),
+                "lucro": Decimal("0"),
+            }
+        resumo = ultimas_por_chave[chave]
+        resumo["itens"].append(venda)
+        resumo["total"] += Decimal(venda.total or 0)
+        resumo["lucro"] += Decimal(venda.lucro or 0)
+    ultimas = list(ultimas_por_chave.values())[:10]
+    for resumo in ultimas:
+        resumo["itens"].reverse()
 
     return pagina("""
 <h1>Painel</h1>
@@ -557,18 +585,21 @@ def painel():
 <th>Lucro</th>
 <th>Pagamento</th>
 </tr>
-{% for venda in ultimas %}
+{% for compra in ultimas %}
 <tr>
+<td>{{ (compra.data|data_local).strftime("%d/%m %H:%M") }}</td>
+<td>{{ compra.cliente }}</td>
 <td>
-{{ (venda.data|data_local).strftime("%d/%m %H:%M") }}
+{% for item in compra.itens %}
+{{ item.produto.nome }} ({{ item.quantidade }} {{ item.produto.unidade }}){% if not loop.last %}<br>{% endif %}
+{% endfor %}
+{% if compra.grupo_id is not none %}
+<br><a href="{{ url_for('detalhe_compra', grupo_id=compra.grupo_id) }}">Ver compra #{{ compra.grupo_id }}</a>
+{% endif %}
 </td>
-<td>
-{{ venda.cliente.nome if venda.cliente else "Sem cliente" }}
-</td>
-<td>{{ venda.produto.nome }}</td>
-<td>{{ venda.total|dinheiro }}</td>
-<td>{{ venda.lucro|dinheiro }}</td>
-<td>{{ "Fiado" if venda.tipo == "fiado" else "À vista" }}</td>
+<td>{{ compra.total|dinheiro }}</td>
+<td>{{ compra.lucro|dinheiro }}</td>
+<td>{{ "Fiado" if compra.tipo == "fiado" else "À vista" }}</td>
 </tr>
 {% else %}
 <tr>

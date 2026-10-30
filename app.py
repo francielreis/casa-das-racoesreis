@@ -1376,6 +1376,13 @@ Remover produto
             aviso + "\n\nOs produtos e as quantidades estão corretos?";
         if (!window.confirm(mensagem)){
             evento.preventDefault();
+            return;
+        }
+        // Impede toque duplo e dois lançamentos acidentais.
+        const botao = evento.currentTarget.querySelector('button[type="submit"]');
+        if (botao) {
+            botao.disabled = true;
+            botao.textContent = "Registrando compra...";
         }
     });
 

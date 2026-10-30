@@ -1246,6 +1246,19 @@ def venda():
             return redirect("/venda")
 
     return pagina(r"""
+<style>
+.produtos-disponiveis {border:1px solid #d5e4d9;border-radius:10px;background:#f8fbf9;margin:2px 0 15px}
+.produtos-disponiveis summary {padding:12px;color:#176b3a;font-weight:700;cursor:pointer}
+.lista-escolhas {padding:0 9px 10px;max-height:255px;overflow-y:auto;overscroll-behavior:contain}
+.produto-escolha {width:100%;display:flex;align-items:center;justify-content:space-between;gap:12px;background:white;color:#222;border:1px solid #dfe6e1;border-radius:9px;margin:6px 0;padding:11px;text-align:left;font-weight:400}
+.produto-escolha .produto-nome {font-weight:700;overflow-wrap:anywhere}
+.produto-escolha .produto-valores {text-align:right;white-space:nowrap}
+.produto-escolha .produto-estoque {display:block;font-size:12px;color:#5d6b60;margin-top:3px}
+.produto-escolha[hidden] {display:none}
+.produto-escolha:focus-visible {outline:3px solid #176b3a;outline-offset:1px}
+.sem-produto {padding:8px 12px;color:#85531d}
+.ajuda-selecao {font-size:13px;color:#58655c;margin:-4px 0 8px}
+</style>
 <h1>Nova venda</h1>
 <p>
 Adicione todos os produtos que o cliente comprou e finalize uma única compra.
@@ -1262,9 +1275,9 @@ Adicione todos os produtos que o cliente comprou e finalize uma única compra.
 <input class="busca-produto" type="search" placeholder="Pesquisar produto pelo nome..."
        aria-label="Pesquisar produto" autocomplete="off">
 <select name="produto" class="produto-venda" required>
-<option value="" selected disabled>Selecione o produto</option>
+<option value="" disabled>Selecione o produto</option>
 {% for produto in produtos %}
-<option value="{{ produto.id }}"
+<option value="{{ produto.id }}" {% if loop.first %}selected{% endif %}
         data-preco="{{ produto.preco }}"
         data-estoque="{{ produto.estoque }}"
         data-unidade="{{ produto.unidade }}">
@@ -1273,6 +1286,23 @@ Estoque: {{ produto.estoque|quantidade_legivel }} {{ produto.unidade }}
 </option>
 {% endfor %}
 </select>
+<p class="ajuda-selecao">Produtos cadastrados abaixo — toque para selecionar.</p>
+<details class="produtos-disponiveis" open>
+<summary>Produtos disponíveis ({{ produtos|length }})</summary>
+<div class="lista-escolhas">
+{% for produto in produtos %}
+<button type="button" class="produto-escolha" data-produto-id="{{ produto.id }}">
+<span class="produto-nome">{{ produto.nome }}</span>
+<span class="produto-valores">{{ produto.preco|dinheiro }}
+<span class="produto-estoque">Estoque: {{ produto.estoque|quantidade_legivel }} {{ produto.unidade }}</span>
+</span>
+</button>
+{% else %}
+<p class="sem-produto">Nenhum produto cadastrado. Cadastre em Produtos.</p>
+{% endfor %}
+</div>
+<p class="sem-produto nenhum-resultado" hidden>Nenhum produto encontrado na pesquisa.</p>
+</details>
 
 <label>Quantidade</label>
 <input name="quantidade" class="quantidade-venda"
@@ -1354,6 +1384,23 @@ Estoque: {{ produto.estoque|quantidade_legivel }} {{ produto.unidade }}
 </option>
 {% endfor %}
 </select>
+<p class="ajuda-selecao">Produtos cadastrados abaixo — toque para selecionar.</p>
+<details class="produtos-disponiveis" open>
+<summary>Produtos disponíveis ({{ produtos|length }})</summary>
+<div class="lista-escolhas">
+{% for produto in produtos %}
+<button type="button" class="produto-escolha" data-produto-id="{{ produto.id }}">
+<span class="produto-nome">{{ produto.nome }}</span>
+<span class="produto-valores">{{ produto.preco|dinheiro }}
+<span class="produto-estoque">Estoque: {{ produto.estoque|quantidade_legivel }} {{ produto.unidade }}</span>
+</span>
+</button>
+{% else %}
+<p class="sem-produto">Nenhum produto cadastrado. Cadastre em Produtos.</p>
+{% endfor %}
+</div>
+<p class="sem-produto nenhum-resultado" hidden>Nenhum produto encontrado na pesquisa.</p>
+</details>
 
 <label>Quantidade</label>
 <input name="quantidade" class="quantidade-venda"
@@ -1381,15 +1428,23 @@ Remover produto
     const tipo = document.getElementById("tipo-venda");
     const areaEntrada = document.getElementById("area-entrada");
 
+    function normalizar(texto) {
+        return String(texto || "").normalize("NFD")
+            .replace(/[\u0300-\u036f]/g, "").toLowerCase();
+    }
     function filtrarProdutos(linha){
         const campo = linha.querySelector(".busca-produto");
-        const select = linha.querySelector(".produto-venda");
-        const termo = campo.value.trim().toLocaleLowerCase("pt-BR");
-        for (const opcao of select.options) {
-            if (!opcao.value) continue;
-            const titulo = opcao.textContent.toLocaleLowerCase("pt-BR");
-            opcao.hidden = Boolean(termo) && !titulo.includes(termo);
-        }
+        const termo = normalizar(campo.value.trim());
+        const botoes = linha.querySelectorAll(".produto-escolha");
+        let visiveis = 0;
+        botoes.forEach((botao)=>{
+            const mostrar = normalizar(botao.querySelector(".produto-nome").textContent)
+                .includes(termo);
+            botao.hidden = !mostrar;
+            if (mostrar) visiveis += 1;
+        });
+        linha.querySelector(".nenhum-resultado").hidden = visiveis > 0;
+        if (termo) linha.querySelector(".produtos-disponiveis").open = true;
     }
 
     function moeda(valor){
@@ -1435,6 +1490,16 @@ Remover produto
         linha.querySelector(".busca-produto").addEventListener(
             "input", ()=>filtrarProdutos(linha)
         );
+        linha.querySelectorAll(".produto-escolha").forEach((botao)=>{
+            botao.addEventListener("click", ()=>{
+                const seletor = linha.querySelector(".produto-venda");
+                seletor.value = botao.dataset.produtoId;
+                linha.querySelector(".busca-produto").value = "";
+                filtrarProdutos(linha);
+                linha.querySelector(".produtos-disponiveis").open = false;
+                atualizar();
+            });
+        });
         linha.querySelector(".produto-venda").addEventListener(
             "change", atualizar
         );

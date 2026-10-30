@@ -1423,53 +1423,50 @@ def detalhe_compra(grupo_id):
 
     return pagina("""
 <h1>Compra #{{ grupo.id }}</h1>
-<p>
-<strong>Data:</strong>
-{{ (grupo.data|data_local).strftime("%d/%m/%Y %H:%M") }}<br>
-<strong>Cliente:</strong>
-{{ grupo.cliente.nome if grupo.cliente else "Sem cliente" }}<br>
-<strong>Tipo:</strong>
-{{ "Fiado" if grupo.tipo == "fiado" else "À vista" }}
-</p>
-
-<div class="tabela">
-<table>
-<tr>
-<th>Produto</th>
-<th>Quantidade</th>
-<th>Preço unitário</th>
-<th>Subtotal</th>
-<th>Lucro</th>
-</tr>
-{% for venda in itens %}
-<tr>
-<td>{{ venda.produto.nome }}</td>
-<td>{{ venda.quantidade }} {{ venda.produto.unidade }}</td>
-<td>{{ venda.preco_unitario|dinheiro }}</td>
-<td>{{ venda.total|dinheiro }}</td>
-<td>{{ venda.lucro|dinheiro }}</td>
-</tr>
-{% else %}
-<tr><td colspan="5">Todos os itens desta compra foram excluídos.</td></tr>
-{% endfor %}
-<tfoot>
-<tr>
-<th colspan="3">TOTAL</th>
-<th>{{ total_atual|dinheiro }}</th>
-<th>{{ lucro_atual|dinheiro }}</th>
-</tr>
-</tfoot>
-</table>
+<p class="compras-ajuda">Confira cada produto registrado nessa compra.</p>
+<div class="compra-card" style="max-width:720px">
+<div class="compra-topo">
+<div>
+<div class="compra-cliente">{{ grupo.cliente.nome if grupo.cliente else "Sem cliente" }}</div>
+<time class="compra-data">{{ (grupo.data|data_local).strftime("%d/%m/%Y às %H:%M") }}</time>
 </div>
-
-<p>
-<strong>Pago no momento da compra:</strong> {{ grupo.pago|dinheiro }}
-</p>
-
+<span class="compra-situacao {{ 'fiado' if grupo.tipo == 'fiado' else '' }}">{{ "Fiado" if grupo.tipo == "fiado" else "À vista" }}</span>
+</div>
+<ul class="compra-itens">
+{% for venda in itens %}
+<li class="compra-item">
+<div>
+<span class="compra-item-nome">{{ venda.produto.nome }}</span>
+<span class="compra-item-dados">{{ venda.quantidade|quantidade_legivel }} {{ venda.produto.unidade }} × {{ venda.preco_unitario|dinheiro }}</span>
+</div>
+<div style="text-align:right">
+<span class="compra-item-total">{{ venda.total|dinheiro }}</span>
+<span class="compra-item-dados">Lucro: {{ venda.lucro|dinheiro }}</span>
+</div>
+</li>
+{% else %}
+<li class="compra-item">Nenhum item ativo nesta compra.</li>
+{% endfor %}
+</ul>
+<div class="compra-rodape">
+<div class="compra-totais">
+<div><small>Total registrado</small><strong>{{ total_atual|dinheiro }}</strong></div>
+<div><small>Lucro bruto registrado</small><strong class="lucro">{{ lucro_atual|dinheiro }}</strong></div>
+</div>
+<p style="margin:14px 0 0"><small>Pago no momento do registro: {{ grupo.pago|dinheiro }}</small></p>
+</div>
+</div>
+<div class="aviso" style="max-width:720px;margin-top:16px">
+Se algum produto não aparece nesta lista, ele não consta entre os itens ativos
+desta compra. Confira o histórico antes de registrar novamente, para não duplicar
+estoque, caixa ou vendas.
+</div>
 <p>
 <a href="/venda">+ Nova venda</a>
 &nbsp;•&nbsp;
-<a href="/vendas">Ver vendas</a>
+<a href="/vendas">Ver todas as vendas</a>
+&nbsp;•&nbsp;
+<a href="/">Voltar ao painel</a>
 </p>
 """,
         grupo=grupo,

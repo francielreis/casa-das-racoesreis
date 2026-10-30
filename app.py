@@ -267,8 +267,8 @@ def dinheiro_decimal(valor):
 def valor_monetario_valido(valor, permite_zero=False):
     return (valor.is_finite()
             and (valor >= 0 if permite_zero else valor > 0)
-            and valor == valor.quantize(CENTAVO)
-            and valor <= Decimal("9999999999.99"))
+            and valor <= Decimal("9999999999.99")
+            and valor == valor.quantize(CENTAVO))
 
 
 def quantidade_legivel(valor):

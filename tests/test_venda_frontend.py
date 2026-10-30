@@ -36,6 +36,10 @@ class TelaVendaTest(unittest.TestCase):
         self.assertIn('Pesquisar produto pelo nome', html)
         self.assertIn('Estoque: 40 saco', html)
         self.assertIn('Torta de algodão', html)
+        self.assertIn('Produtos disponíveis (1)', html)
+        self.assertIn('class="produto-escolha"', html)
+        self.assertIn('data-produto-id="1"', html)
+        self.assertIn('value="1" selected', html)
         scripts = re.findall(r"<script[^>]*>(.*?)</script>", html, re.S)
         self.assertTrue(scripts)
         return scripts[-1]
@@ -67,11 +71,24 @@ const detalhes = {textContent:""};
 const subtotal = {textContent:""};
 const busca = {value:"", addEventListener:noop};
 const remover = {addEventListener:noop};
-const linha = {querySelector(x) {return ({
+const painel = {open:true};
+const nenhum = {hidden:true};
+const produtoNome = {textContent:"Torta de algodão"};
+const botao = {
+    dataset:{produtoId:"1"},
+    hidden:false,
+    querySelector:(x)=>x===".produto-nome" ? produtoNome : null,
+    addEventListener:(name, fn)=>{ if(name==="click") botao.click=fn; }
+};
+const linha = {
+ querySelector(x) {return ({
  ".produto-venda":select, ".quantidade-venda":quantidade,
  ".detalhes-produto":detalhes, ".subtotal-item":subtotal,
- ".busca-produto":busca, ".remover-item":remover
-})[x];}};
+ ".busca-produto":busca, ".remover-item":remover,
+ ".produtos-disponiveis":painel, ".nenhum-resultado":nenhum
+ })[x];},
+ querySelectorAll:(x)=>x===".produto-escolha" ? [botao] : []
+};
 const itens = {querySelectorAll:()=>[linha],querySelector:()=>linha};
 const total={textContent:""};
 const tipo={value:"avista",addEventListener:noop};
@@ -93,6 +110,11 @@ if (subtotal.textContent.replace(/\s/g, " ") !== "Subtotal: R$ 93,00")
     throw Error("Subtotal inválido: "+subtotal.textContent);
 if (!detalhes.textContent.includes("Estoque: 40"))
     throw Error("Estoque não aparece: "+detalhes.textContent);
+if(typeof botao.click !== "function") throw Error("Clique não foi ligado ao produto");
+botao.click();
+if(painel.open !== false) throw Error("Lista não fechou após escolher produto");
+busca.value = "torta";
+if(botao.hidden) throw Error("Produto encontrado foi ocultado");
 """
         resultado = subprocess.run(
             ["node", "-"], input=setup + js + verificar, text=True,

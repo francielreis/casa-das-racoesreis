@@ -88,8 +88,8 @@ const document={getElementById:(id)=>elementos[id]};
 const window={confirm:()=>true};
 """
         verificar = r"""
-if (total.textContent !== "R$ 93,00") throw Error("Total inválido: "+total.textContent);
-if (subtotal.textContent !== "Subtotal: R$ 93,00")
+if (total.textContent.replace(/\s/g, " ") !== "R$ 93,00") throw Error("Total inválido: "+total.textContent);
+if (subtotal.textContent.replace(/\s/g, " ") !== "Subtotal: R$ 93,00")
     throw Error("Subtotal inválido: "+subtotal.textContent);
 if (!detalhes.textContent.includes("Estoque: 40"))
     throw Error("Estoque não aparece: "+detalhes.textContent);

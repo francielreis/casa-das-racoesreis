@@ -114,7 +114,7 @@ if(typeof botao.click !== "function") throw Error("Clique não foi ligado ao pro
 botao.click();
 if(painel.open !== false) throw Error("Lista não fechou após escolher produto");
 busca.value = "torta";
-if(!botao.hidden) throw Error("Produto encontrado foi ocultado");
+if(botao.hidden) throw Error("Produto encontrado foi ocultado");
 """
         resultado = subprocess.run(
             ["node", "-"], input=setup + js + verificar, text=True,

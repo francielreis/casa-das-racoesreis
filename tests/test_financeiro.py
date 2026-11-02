@@ -99,6 +99,34 @@ class AuditoriaFinanceiraTest(unittest.TestCase):
             self.assertEqual(Caixa.query.count(), count)
             self.assertEqual(db.session.get(Venda, vid).pago, Decimal("50.00"))
 
+    def test_pdf_auditoria_fiado_com_acesso_restrito_e_sem_alterar_dados(self):
+        sem_login = app.test_client().get("/auditoria-fiado?formato=pdf")
+        self.assertEqual(sem_login.status_code, 302)
+        self.assertIn("/login", sem_login.location)
+
+        self.web.post("/venda", data=self.venda_form("fiado", "50.00"))
+        with app.app_context():
+            vendas_antes = Venda.query.count()
+            caixa_antes = Caixa.query.count()
+            saldo_antes = sum((v.saldo_devedor for v in Venda.query.all()), Decimal("0"))
+            self.assertEqual(saldo_antes, Decimal("120.00"))
+
+        pdf = self.web.get("/auditoria-fiado?formato=pdf")
+        self.assertEqual(pdf.status_code, 200)
+        self.assertEqual(pdf.mimetype, "application/pdf")
+        self.assertTrue(pdf.data.startswith(b"%PDF-"))
+        self.assertGreater(len(pdf.data), 1500)
+        self.assertIn("attachment", pdf.headers["Content-Disposition"])
+        self.assertIn("no-store", pdf.headers["Cache-Control"])
+
+        with app.app_context():
+            self.assertEqual(Venda.query.count(), vendas_antes)
+            self.assertEqual(Caixa.query.count(), caixa_antes)
+            self.assertEqual(
+                sum((v.saldo_devedor for v in Venda.query.all()), Decimal("0")),
+                saldo_antes,
+            )
+
     def test_rejeitar_movimento_invalido(self):
         resp = self.web.post("/caixa", data={
             "tipo": "entrada", "valor": "NaN", "descricao": "Nao permitido"

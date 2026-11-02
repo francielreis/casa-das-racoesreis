@@ -38,6 +38,11 @@ elif database_url.startswith("postgresql://"):
 
 app.config["SQLALCHEMY_DATABASE_URI"] = database_url
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+# Cookies de sessao seguros no Render (HTTPS), inclusive durante recebimentos.
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = os.getenv("RENDER", "").lower() == "true"
+
 
 db = SQLAlchemy(app)
 FUSO_LOJA = ZoneInfo("America/Fortaleza")
@@ -285,6 +290,46 @@ app.jinja_env.filters["quantidade_legivel"] = quantidade_legivel
 
 def logado():
     return session.get("logado") is True
+
+def csrf_token():
+    """Gera um token imprevisivel vinculado a sessao autenticada."""
+    token = session.get("_csrf_token")
+    if not isinstance(token, str) or len(token) < 32:
+        token = secrets.token_urlsafe(32)
+        session["_csrf_token"] = token
+    return token
+
+
+app.jinja_env.globals["csrf_token"] = csrf_token
+
+
+@app.before_request
+def exigir_csrf_em_alteracoes():
+    """Rejeita requisicoes POST sem token valido antes de qualquer gravacao."""
+    if request.method != "POST":
+        return None
+    esperado = session.get("_csrf_token")
+    recebido = request.form.get("_csrf_token", "")
+    if (not isinstance(esperado, str)
+            or not isinstance(recebido, str)
+            or len(esperado) < 32
+            or len(recebido) > 256
+            or not hmac.compare_digest(recebido, esperado)):
+        app.logger.warning("POST bloqueado por CSRF ausente/invalido: %s", request.path)
+        return ("Verificação de segurança expirada ou inválida. "
+                "Atualize o formulário antes de tentar novamente.", 400)
+    return None
+
+
+@app.after_request
+def proteger_respostas_administrativas(resposta):
+    resposta.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resposta.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    if session.get("logado"):
+        resposta.headers["Cache-Control"] = "private, no-store"
+    return resposta
+
+
 
 
 BASE = """
@@ -742,7 +787,9 @@ def login():
         senha = request.form["senha"]
 
         if usuario == usuario_correto and senha == senha_correta:
+            session.clear()
             session["logado"] = True
+            csrf_token()
             return redirect("/")
 
         flash("Usuário ou senha incorretos.", "erro")
@@ -751,6 +798,7 @@ def login():
 <div class="formulario">
 <h1>Entrar</h1>
 <form method="post">
+<input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
 <label>Usuário</label>
 <input name="usuario" required>
 <label>Senha</label>
@@ -1020,6 +1068,7 @@ def produtos():
 <h1>Produtos</h1>
 <div class="formulario">
 <form method="post">
+<input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
 <label>Nome do produto</label>
 <input name="nome" placeholder="Ex: Milho 60 kg" required>
 <label>Categoria</label>
@@ -1115,6 +1164,7 @@ def alterar_preco(produto_id):
 <h2>{{ produto.nome }}</h2>
 <p>Valores por {{ produto.unidade }}. Os novos preços serão usados nas próximas vendas.</p>
 <form method="post">
+<input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
 <input type="hidden" name="csrf_precos" value="{{ token }}">
 <label for="custo">Preço de compra (R$)</label>
 <input id="custo" name="custo" inputmode="decimal" value="{{ custo }}" required>
@@ -1194,6 +1244,7 @@ def entrada():
 <h1>Entrada de mercadoria</h1>
 <div class="formulario">
 <form method="post">
+<input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
 <label>Produto</label>
 <select name="produto">
 {% for produto in produtos %}
@@ -1239,6 +1290,7 @@ def clientes():
 <h1>Clientes</h1>
 <div class="formulario">
 <form method="post">
+<input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
 <label>Nome</label>
 <input name="nome" required>
 <label>Telefone</label>
@@ -1548,6 +1600,7 @@ Adicione todos os produtos que o cliente comprou e finalize uma única compra.
 </p>
 
 <form method="post" id="form-venda">
+<input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
 <input type="hidden" name="chave_requisicao" value="{{ chave_requisicao }}">
 <div class="formulario" style="max-width:850px">
 <h2>Itens da compra</h2>
@@ -2039,6 +2092,7 @@ Confira também a devolução do dinheiro ao cliente, quando houver.</p>
 <p>O registro original será guardado para conferência. Esta ação não pode ser desfeita pela tela.</p>
 </div>
 <form method="post">
+<input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
 <input type="hidden" name="csrf_excluir_venda" value="{{ token }}">
 <input type="hidden" name="pago_conferido" value="{{ v.pago }}">
 <label><input style="width:auto" type="checkbox" name="confirmar" value="sim" required>
@@ -2081,6 +2135,7 @@ def fiado():
 <td>
 {% if venda.saldo_devedor > 0 %}
 <form method="post" action="/receber/{{ venda.id }}">
+<input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
 <input name="valor" type="number" step="0.01"
        placeholder="Valor recebido" required>
 <button>Receber</button>
@@ -2462,6 +2517,7 @@ def caixa():
 <br>
 <div class="formulario">
 <form method="post">
+<input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
 <label>Movimento</label>
 <select name="tipo">
 <option value="entrada">Entrada</option>
@@ -2580,6 +2636,7 @@ Cada lançamento é uma saída do caixa e fica salvo no histórico.</p>
 <div class="formulario">
 <h2>Adicionar despesa</h2>
 <form method="post">
+<input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
 <input type="hidden" name="csrf_despesas" value="{{ token }}">
 <label for="categoria">Tipo de despesa</label>
 <select id="categoria" name="categoria" required>
@@ -2663,6 +2720,7 @@ def zerar_caixa():
 <p>O histórico continuará nos <a href="/relatorios">relatórios</a>.
 O estoque e os fiados a receber serão mantidos.</p>
 <form method="post">
+<input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
 <input type="hidden" name="csrf_zerar" value="{{ token }}">
 <label><input style="width:auto" type="checkbox" name="confirmar"
 value="sim" required> Confirmo que desejo iniciar uma nova contagem.</label>
@@ -4001,6 +4059,7 @@ Os ativos aparecem no catálogo, do menor número de ordem para o maior.
 <div class="formulario">
 <h2>Adicionar banner</h2>
 <form method="post" enctype="multipart/form-data">
+<input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
 <input type="hidden" name="csrf_banners" value="{{ token }}">
 <input type="hidden" name="acao" value="criar">
 
@@ -4044,6 +4103,7 @@ Ver catálogo público
 </p>
 
 <form method="post" enctype="multipart/form-data">
+<input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
 <input type="hidden" name="csrf_banners" value="{{ token }}">
 <input type="hidden" name="acao" value="editar">
 <input type="hidden" name="banner_id" value="{{ banner.id }}">

@@ -492,6 +492,7 @@ h1{color:#176b3a}
         return (valor || "").normalize("NFD")
             .replace(/[\u0300-\u036f]/g, "").toLowerCase();
     }
+    if (typeof document.querySelectorAll !== "function") return;
     document.querySelectorAll(".tabela table").forEach(function (tabela, indice) {
         const linhas = Array.from(tabela.querySelectorAll("tbody tr")).filter(
             function (linha) {return linha.querySelector("td") !== null;}

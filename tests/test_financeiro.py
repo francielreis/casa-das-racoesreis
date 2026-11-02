@@ -34,8 +34,20 @@ class AuditoriaFinanceiraTest(unittest.TestCase):
             db.session.commit()
             self.ids = (self.feijao.id, self.torta.id, self.cliente.id)
         self.web = app.test_client()
-        resposta = self.web.post("/login", data={"usuario": "auditor", "senha": "senha-testes"})
+        resposta = self.web.post("/login", data={
+            "usuario": "auditor", "senha": "senha-testes",
+            "_csrf_token": self.csrf("/login"),
+        })
         self.assertEqual(resposta.status_code, 302)
+
+    def csrf(self, caminho):
+        pagina = self.web.get(caminho)
+        self.assertEqual(pagina.status_code, 200)
+        correspondencia = re.search(
+            r'name="_csrf_token" value="([^"]+)"', pagina.get_data(as_text=True)
+        )
+        self.assertIsNotNone(correspondencia, caminho)
+        return correspondencia.group(1)
 
     def venda_form(self, tipo="avista", entrada="0"):
         pagina = self.web.get("/venda")
@@ -44,6 +56,7 @@ class AuditoriaFinanceiraTest(unittest.TestCase):
         self.assertIsNotNone(token)
         return MultiDict([
             ("chave_requisicao", token.group(1)),
+            ("_csrf_token", self.csrf("/venda")),
             ("produto", str(self.ids[0])), ("quantidade", "1"),
             ("produto", str(self.ids[1])), ("quantidade", "1"),
             ("tipo", tipo), ("cliente", str(self.ids[2])),
@@ -75,7 +88,8 @@ class AuditoriaFinanceiraTest(unittest.TestCase):
         self.web.post("/venda", data=self.venda_form())
         resposta = self.web.post("/entrada", data={
             "produto": str(self.ids[0]), "quantidade": "10",
-            "custo": "90.00", "registrar_caixa": "sim"
+            "custo": "90.00", "registrar_caixa": "sim",
+            "_csrf_token": self.csrf("/entrada")
         })
         self.assertEqual(resposta.status_code, 302)
         with app.app_context():
@@ -93,7 +107,7 @@ class AuditoriaFinanceiraTest(unittest.TestCase):
             v = Venda.query.order_by(Venda.id).first()
             vid = v.id
             count = Caixa.query.count()
-        resposta = self.web.post("/receber/" + str(vid), data={"valor": "999.00"})
+        resposta = self.web.post("/receber/" + str(vid), data={"valor": "999.00", "_csrf_token": self.csrf("/fiado")})
         self.assertEqual(resposta.status_code, 302)
         with app.app_context():
             self.assertEqual(Caixa.query.count(), count)
@@ -245,9 +259,74 @@ class AuditoriaFinanceiraTest(unittest.TestCase):
         self.assertNotIn("<script>alert(1)</script>", html)
         self.assertIn("&lt;script&gt;", html)
 
+    def test_csrf_bloqueia_posts_sem_token_sem_modificar_lancamentos(self):
+        rotas = (
+            ("/login", {"usuario": "auditor", "senha": "senha-testes"}),
+            ("/produtos", {"nome": "Produto falso", "preco": "10", "custo": "5", "unidade": "saco"}),
+            ("/clientes", {"nome": "Cliente falso"}),
+            ("/entrada", {"produto": str(self.ids[0]), "quantidade": "2", "custo": "70"}),
+            ("/venda", self.venda_form()),
+            ("/caixa", {"tipo": "entrada", "valor": "150", "descricao": "Entrada falsa"}),
+            ("/despesas", {"categoria": "Aluguel", "valor": "10"}),
+            ("/banners", {"acao": "salvar"}),
+            ("/zerar-caixa", {"confirmar": "sim"}),
+            ("/produtos/" + str(self.ids[0]) + "/preco", {"preco": "999", "custo": "1"}),
+        )
+        for caminho, dados in rotas:
+            resposta = self.web.post(caminho, data={
+                k: v for k, v in dados.items() if k != "_csrf_token"
+            })
+            self.assertEqual(resposta.status_code, 400, caminho)
+
+        with app.app_context():
+            self.assertEqual(Venda.query.count(), 0)
+            self.assertEqual(VendaGrupo.query.count(), 0)
+            self.assertEqual(Caixa.query.count(), 0)
+            self.assertEqual(db.session.get(Produto, self.ids[0]).preco, Decimal("80.00"))
+
+        outro_navegador = app.test_client()
+        outro_navegador.get("/login")
+        resposta = outro_navegador.post("/login", data={
+            "usuario": "auditor", "senha": "senha-testes",
+            "_csrf_token": self.csrf("/login"),
+        })
+        self.assertEqual(resposta.status_code, 400)
+
+    def test_csrf_recebimento_valido_e_falso_bloqueado(self):
+        self.web.post("/venda", data=self.venda_form("fiado", "50.00"))
+        with app.app_context():
+            venda_id = Venda.query.order_by(Venda.id).first().id
+            caixa_antes = Caixa.query.count()
+        rota = "/receber/" + str(venda_id)
+        self.assertEqual(self.web.post(rota, data={"valor": "25.00"}).status_code, 400)
+        valido = self.web.post(rota, data={
+            "valor": "25.00", "_csrf_token": self.csrf("/fiado")
+        })
+        self.assertEqual(valido.status_code, 302)
+        with app.app_context():
+            self.assertEqual(db.session.get(Venda, venda_id).pago, Decimal("75.00"))
+            self.assertEqual(Caixa.query.count(), caixa_antes + 1)
+
+    def test_formularios_post_contem_token_csrf(self):
+        # O formulario "Receber" so aparece quando existe um fiado registrado.
+        self.web.post("/venda", data=self.venda_form("fiado", "0.00"))
+        paginas = ["/login", "/produtos", "/clientes", "/entrada", "/venda",
+                   "/fiado", "/caixa", "/despesas", "/banners", "/zerar-caixa",
+                   "/produtos/" + str(self.ids[0]) + "/preco"]
+        for pagina in paginas:
+            html = self.web.get(pagina).get_data(as_text=True)
+            formularios = re.findall(
+                r'<form\b[^>]*\bmethod=["\']post["\'][^>]*>.*?</form>',
+                html, flags=re.I | re.S,
+            )
+            self.assertTrue(formularios, pagina)
+            for formulario in formularios:
+                self.assertIn('name="_csrf_token"', formulario, pagina)
+
     def test_rejeitar_movimento_invalido(self):
         resp = self.web.post("/caixa", data={
-            "tipo": "entrada", "valor": "NaN", "descricao": "Nao permitido"
+            "tipo": "entrada", "valor": "NaN", "descricao": "Nao permitido",
+            "_csrf_token": self.csrf("/caixa")
         })
         self.assertEqual(resp.status_code, 302)
         with app.app_context():

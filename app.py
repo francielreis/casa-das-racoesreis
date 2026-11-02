@@ -1777,7 +1777,7 @@ def fiado():
 
     return pagina("""
 <h1>Contas fiado</h1>
-<p><a href="/auditoria-fiado"><strong>Ver auditoria detalhada dos fiados por cliente</strong></a></p>
+<p><a href="/auditoria-fiado"><strong>Ver auditoria detalhada dos fiados por cliente</strong></a> · <a href="/auditoria-fiado?formato=pdf"><strong>Baixar PDF</strong></a></p>
 <div class="tabela">
 <table>
 <tr>
@@ -1949,6 +1949,25 @@ def auditoria_fiado():
                 + " registros diferentes (" + nome + "). Conferir se e a mesma pessoa."
             )
 
+    if request.args.get("formato") == "pdf":
+        from fiado_pdf import gerar_pdf_fiado
+
+        pdf = gerar_pdf_fiado(
+            clientes=clientes, grupo_por_venda=grupo_por_venda,
+            total_fiado=total_fiado, total_pago=total_pago,
+            fiado_antigo=fiado_antigo, fiado_atual=fiado_atual,
+            alertas=alertas, formata_dinheiro=dinheiro,
+            data_local=data_local, fuso_loja=FUSO_LOJA,
+        )
+        return Response(
+            pdf, mimetype="application/pdf",
+            headers={
+                "Content-Disposition": "attachment; filename=auditoria-fiado.pdf",
+                "Cache-Control": "private, no-store",
+                "X-Content-Type-Options": "nosniff",
+            }
+        )
+
     if request.args.get("formato") == "csv":
         arquivo = StringIO()
         escritor = csv.writer(arquivo, delimiter=";")
@@ -1981,7 +2000,7 @@ def auditoria_fiado():
 <h1>Auditoria detalhada do fiado</h1>
 <p>Conferencia somente leitura com todos os fiados ainda existentes no banco,
 mesmo de caixas anteriores. Nenhuma venda ou pagamento sera alterado.</p>
-<p><a href="/auditoria-fiado?formato=csv">Baixar planilha CSV de todos os fiados</a>
+<p><a href="/auditoria-fiado?formato=pdf"><strong>Baixar relatório em PDF</strong></a> · <a href="/auditoria-fiado?formato=csv">Baixar planilha CSV de todos os fiados</a>
  · <a href="/auditoria-financeira">Ver auditoria financeira geral</a></p>
 <div class="cards">
 <div class="card"><h3>Fiado a receber</h3><div class="valor">{{ (antigo + novo)|dinheiro }}</div></div>

@@ -2147,7 +2147,7 @@ def caixa():
     return pagina("""
 <h1>Caixa</h1>
 <p>Valores desde o último zeramento.
-<a href="/zerar-caixa">Zerar caixa e vendas</a></p>
+<a href="/zerar-caixa">Zerar caixa e vendas</a> · <a href="/relatorios">Baixar relatório financeiro em PDF</a></p>
 <p><a href="/despesas">Registrar aluguel e outras despesas da loja</a></p>
 <div class="cards">
 <div class="card">
@@ -2500,6 +2500,30 @@ def relatorios():
             reverse=True
         )
 
+    if request.args.get("formato") == "pdf":
+        from relatorios_pdf import gerar_pdf_relatorio
+
+        documento = gerar_pdf_relatorio(
+            periodo=periodo, inicio_local=inicio_local, fim_local=fim_local,
+            vendas=vendas, movimentos=movimentos,
+            produtos_agrupados=produtos_agrupados, total=total,
+            lucro=lucro, entradas=entradas, saidas=saidas,
+            fiado_atual=fiado_atual, formata_dinheiro=dinheiro,
+            formata_quantidade=quantidade_legivel,
+            data_local=data_local, fuso_loja=FUSO_LOJA,
+        )
+        nome = ("relatorio-" + periodo + "-"
+                + inicio_local.strftime("%Y-%m-%d") + "-a-"
+                + (fim_local - timedelta(days=1)).strftime("%Y-%m-%d") + ".pdf")
+        return Response(
+            documento, mimetype="application/pdf",
+            headers={
+                "Content-Disposition": "attachment; filename=" + nome,
+                "Cache-Control": "private, no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
     return pagina("""
 <h1>Relatórios</h1>
 
@@ -2533,7 +2557,8 @@ def relatorios():
        {% if periodo == 'personalizado' %}required{% endif %}>
 <p>Inclui todos os lançamentos dos dois dias, mesmo após zerar o caixa.</p>
 </div>
-<button>Consultar relatório</button>
+<button type="submit">Consultar relatório</button>
+<button type="submit" name="formato" value="pdf" style="background:#225f43">📄 Baixar PDF do período</button>
 </form>
 <script>
 (function () {

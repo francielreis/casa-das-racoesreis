@@ -127,6 +127,53 @@ class AuditoriaFinanceiraTest(unittest.TestCase):
                 saldo_antes,
             )
 
+    def test_pdf_relatorios_periodos_e_registros_preservados(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        sem_login = app.test_client().get("/relatorios?formato=pdf")
+        self.assertEqual(sem_login.status_code, 302)
+        self.assertIn("/login", sem_login.location)
+
+        self.web.post("/venda", data=self.venda_form("fiado", "50.00"))
+        referencia = datetime.now(ZoneInfo("America/Fortaleza")).strftime("%Y-%m-%d")
+        with app.app_context():
+            vendas_antes = Venda.query.count()
+            caixa_antes = Caixa.query.count()
+            valor_antes = sum((v.total for v in Venda.query.all()), Decimal("0"))
+            self.assertEqual(valor_antes, Decimal("170.00"))
+
+        for periodo in ("diario", "semanal", "mensal", "personalizado"):
+            url = (
+                "/relatorios?periodo=personalizado&data_inicio=" + referencia
+                + "&data_fim=" + referencia + "&formato=pdf"
+                if periodo == "personalizado"
+                else "/relatorios?periodo=" + periodo + "&data=" + referencia
+                     + "&formato=pdf"
+            )
+            resposta = self.web.get(url)
+            self.assertEqual(resposta.status_code, 200, periodo)
+            self.assertEqual(resposta.mimetype, "application/pdf", periodo)
+            self.assertTrue(resposta.data.startswith(b"%PDF-"), periodo)
+            self.assertGreater(len(resposta.data), 1900, periodo)
+            self.assertIn("attachment", resposta.headers["Content-Disposition"])
+            self.assertIn("no-store", resposta.headers["Cache-Control"])
+
+        tela = self.web.get("/relatorios?periodo=mensal&data=" + referencia)
+        self.assertIn("Baixar PDF do período", tela.get_data(as_text=True))
+        invalido = self.web.get(
+            "/relatorios?periodo=personalizado&data_inicio=2026-11-02"
+            "&data_fim=2026-11-01&formato=pdf"
+        )
+        self.assertEqual(invalido.status_code, 302)
+        with app.app_context():
+            self.assertEqual(Venda.query.count(), vendas_antes)
+            self.assertEqual(Caixa.query.count(), caixa_antes)
+            self.assertEqual(
+                sum((v.total for v in Venda.query.all()), Decimal("0")),
+                valor_antes,
+            )
+
     def test_rejeitar_movimento_invalido(self):
         resp = self.web.post("/caixa", data={
             "tipo": "entrada", "valor": "NaN", "descricao": "Nao permitido"

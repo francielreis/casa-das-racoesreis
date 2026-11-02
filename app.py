@@ -11,7 +11,7 @@ from flask import (
     render_template_string, Response, send_from_directory, url_for
 )
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import or_, and_
+from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 from markupsafe import Markup
 
@@ -490,7 +490,7 @@ h1{color:#176b3a}
     // acima permite buscar registros fora da página, inclusive históricos.
     function normalizar(valor) {
         return (valor || "").normalize("NFD")
-            .replace(/[\\u0300-\\u036f]/g, "").toLowerCase();
+            .replace(/[\u0300-\u036f]/g, "").toLowerCase();
     }
     document.querySelectorAll(".tabela table").forEach(function (tabela, indice) {
         const linhas = Array.from(tabela.querySelectorAll("tbody tr")).filter(

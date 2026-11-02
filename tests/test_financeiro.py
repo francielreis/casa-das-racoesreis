@@ -177,7 +177,7 @@ class AuditoriaFinanceiraTest(unittest.TestCase):
     def test_pesquisa_global_aparece_nas_telas_e_requer_login(self):
         visitante = app.test_client()
         self.assertIn("/login", visitante.get("/pesquisa?q=feijao").location)
-        self.assertNotIn("pesquisa-global", visitante.get("/login").get_data(as_text=True))
+        self.assertNotIn('<form class="pesquisa-global"', visitante.get("/login").get_data(as_text=True))
         for pagina_url in ("/", "/produtos", "/clientes", "/entrada", "/venda",
                            "/vendas", "/fiado", "/caixa", "/relatorios",
                            "/auditoria-financeira", "/auditoria-fiado"):

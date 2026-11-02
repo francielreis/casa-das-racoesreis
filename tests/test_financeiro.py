@@ -308,6 +308,8 @@ class AuditoriaFinanceiraTest(unittest.TestCase):
             self.assertEqual(Caixa.query.count(), caixa_antes + 1)
 
     def test_formularios_post_contem_token_csrf(self):
+        # O formulario "Receber" so aparece quando existe um fiado registrado.
+        self.web.post("/venda", data=self.venda_form("fiado", "0.00"))
         paginas = ["/login", "/produtos", "/clientes", "/entrada", "/venda",
                    "/fiado", "/caixa", "/despesas", "/banners", "/zerar-caixa",
                    "/produtos/" + str(self.ids[0]) + "/preco"]

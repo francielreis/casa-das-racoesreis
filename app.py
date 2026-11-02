@@ -11,6 +11,7 @@ from flask import (
     render_template_string, Response, send_from_directory, url_for
 )
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 from markupsafe import Markup
 
@@ -318,6 +319,35 @@ nav a{
     padding:11px
 }
 .container{max-width:1100px;margin:auto;padding:15px}
+
+/* Pesquisa em todas as telas administrativas, inclusive mobile */
+.pesquisa-global{
+    display:flex;flex-wrap:wrap;align-items:stretch;gap:8px;
+    padding:12px 15px;background:#e8f1eb;border-bottom:1px solid #cbded1
+}
+.pesquisa-global input,.pesquisa-global select{
+    margin:0;background:#fff;min-height:44px;font-size:15px
+}
+.pesquisa-global input{flex:2 1 210px;min-width:0}
+.pesquisa-global select{flex:1 1 130px;max-width:230px;min-width:120px}
+.pesquisa-global button{min-height:44px;flex:0 0 auto}
+.pesquisa-local{
+    display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:12px 0 9px
+}
+.pesquisa-local label{color:#4d5f53;font-size:13px;font-weight:bold}
+.pesquisa-local input{margin:0;width:min(100%,350px);min-height:40px;background:#fff}
+.pesquisa-local small{color:#58665c}
+.pesquisa-resultado{background:white;border:1px solid #dfe8e2;border-radius:10px;padding:13px;margin:9px 0}
+.pesquisa-resultado a{color:#176b3a;font-weight:bold}
+tr:target{background:#fff4c5!important;outline:2px solid #e0a619}
+.pesquisa-resultado small{color:#536158;display:block;margin-top:5px}
+@media(max-width:550px){
+    .pesquisa-global{gap:7px;padding:10px}
+    .pesquisa-global input{flex:1 1 100%;width:100%}
+    .pesquisa-global select{flex:1 1 auto;max-width:none}
+    .pesquisa-global button{padding:10px 13px}
+}
+
 .cards{
     display:grid;
     grid-template-columns:repeat(auto-fit,minmax(160px,1fr));
@@ -409,8 +439,25 @@ h1{color:#176b3a}
 </header>
 
 {% if session.get("logado") %}
+<form class="pesquisa-global" action="{{ url_for('pesquisa') }}" method="get" role="search" aria-label="Pesquisar no sistema">
+<label for="busca-global" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)">Pesquisar em todas as telas</label>
+<input id="busca-global" type="search" name="q" maxlength="120" autocomplete="off"
+ placeholder="🔎 Pesquisar cliente, produto, venda, fiado..."
+ value="{{ request.args.get('q', '')[:120] if request.path == '/pesquisa' else '' }}" required>
+<label for="pesquisa-secao" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)">Onde pesquisar</label>
+<select id="pesquisa-secao" name="secao" aria-label="Onde pesquisar">
+{% for chave, titulo in [
+('tudo', 'Todas as seções'), ('produtos', 'Produtos'), ('clientes', 'Clientes'),
+('vendas', 'Vendas'), ('fiados', 'Fiados'), ('caixa', 'Caixa'), ('entradas', 'Entradas')
+] %}
+<option value="{{ chave }}" {% if request.path == '/pesquisa' and request.args.get('secao','tudo') == chave %}selected{% endif %}>{{ titulo }}</option>
+{% endfor %}
+</select>
+<button type="submit">Pesquisar</button>
+</form>
 <nav>
 <a href="/">Painel</a>
+<a href="/pesquisa">🔎 Pesquisa</a>
 <a href="/produtos">Produtos</a>
 <a href="/entrada">Entrada</a>
 <a href="/venda">Venda</a>
@@ -436,6 +483,54 @@ h1{color:#176b3a}
 {% endwith %}
 {{ conteudo }}
 </div>
+{% if session.get("logado") %}
+<script>
+(function () {
+    // Pesquisa local somente nas linhas presentes na tabela. A pesquisa geral
+    // acima permite buscar registros fora da página, inclusive históricos.
+    function normalizar(valor) {
+        return (valor || "").normalize("NFD")
+            .replace(/[\u0300-\u036f]/g, "").toLowerCase();
+    }
+    if (typeof document.querySelectorAll !== "function") return;
+    document.querySelectorAll(".tabela table").forEach(function (tabela, indice) {
+        const linhas = Array.from(tabela.querySelectorAll("tbody tr")).filter(
+            function (linha) {return linha.querySelector("td") !== null;}
+        );
+        if (linhas.length < 2) return;
+        const caixa = tabela.closest(".tabela");
+        if (!caixa || caixa.dataset.pesquisaLocal) return;
+        caixa.dataset.pesquisaLocal = "sim";
+        const barra = document.createElement("div");
+        barra.className = "pesquisa-local";
+        const label = document.createElement("label");
+        const campo = document.createElement("input");
+        campo.type = "search";
+        campo.id = "pesquisa-tabela-" + indice;
+        campo.placeholder = "Filtrar nesta tabela...";
+        campo.setAttribute("aria-label", "Filtrar linhas visíveis nesta tabela");
+        label.htmlFor = campo.id;
+        label.textContent = "🔎 Buscar na lista";
+        const status = document.createElement("small");
+        status.setAttribute("aria-live", "polite");
+        status.textContent = linhas.length + " linha(s) visíveis";
+        barra.append(label, campo, status);
+        caixa.parentNode.insertBefore(barra, caixa);
+        campo.addEventListener("input", function () {
+            const termo = normalizar(campo.value.trim());
+            let total = 0;
+            linhas.forEach(function (linha) {
+                const encontrou = !termo || normalizar(linha.textContent).includes(termo);
+                linha.hidden = !encontrou;
+                if (encontrou) total++;
+            });
+            status.textContent = total + " de " + linhas.length + " linha(s) visíveis"
+                + (termo ? " nesta página" : "");
+        });
+    });
+})();
+</script>
+{% endif %}
 </body>
 </html>
 """
@@ -447,6 +542,194 @@ def pagina(template, **dados):
         BASE,
         conteudo=Markup(conteudo)
     )
+
+
+@app.route("/pesquisa")
+def pesquisa():
+    """Pesquisa autenticada em todo o histórico, sem alterar registros."""
+    if not logado():
+        return redirect("/login")
+
+    termo = request.args.get("q", "").strip()[:120]
+    secao = request.args.get("secao", "tudo")
+    secoes_permitidas = {"tudo", "produtos", "clientes", "vendas", "fiados", "caixa", "entradas"}
+    if secao not in secoes_permitidas:
+        secao = "tudo"
+
+    resultados = {categoria: [] for categoria in (
+        "produtos", "clientes", "vendas", "fiados", "caixa", "entradas"
+    )}
+    if termo:
+        # Escapa os curingas do LIKE para pesquisar o texto literalmente.
+        termo_escapado = (termo.replace("\\", "\\\\")
+                         .replace("%", "\\%").replace("_", "\\_"))
+        padrao = "%" + termo_escapado + "%"
+        numero_id = termo.lstrip("#")
+        id_busca = int(numero_id) if numero_id.isdecimal() and len(numero_id) <= 9 else None
+        def filtros(*colunas, identificador=None):
+            expressoes = [coluna.ilike(padrao, escape="\\") for coluna in colunas]
+            if id_busca is not None and identificador is not None:
+                expressoes.append(identificador == id_busca)
+            return or_(*expressoes)
+
+        if secao in ("tudo", "produtos"):
+            resultados["produtos"] = (Produto.query.filter(
+                filtros(Produto.nome, Produto.categoria, identificador=Produto.id)
+            ).order_by(Produto.nome, Produto.id).limit(30).all())
+
+        if secao in ("tudo", "clientes"):
+            resultados["clientes"] = (Cliente.query.filter(
+                filtros(Cliente.nome, Cliente.telefone, identificador=Cliente.id)
+            ).order_by(Cliente.nome, Cliente.id).limit(30).all())
+
+        if secao in ("tudo", "vendas", "fiados"):
+            busca_vendas = (vendas_validas()
+                           .join(Produto, Venda.produto_id == Produto.id)
+                           .outerjoin(Cliente, Venda.cliente_id == Cliente.id)
+                           .filter(filtros(
+                               Produto.nome, Cliente.nome,
+                               identificador=Venda.id
+                           )))
+            if secao in ("tudo", "vendas"):
+                resultados["vendas"] = (busca_vendas.order_by(
+                    Venda.id.desc()).limit(30).all())
+            if secao in ("tudo", "fiados"):
+                resultados["fiados"] = (busca_vendas.filter(
+                    Venda.tipo == "fiado").order_by(Venda.id.desc()).limit(30).all())
+
+        if secao in ("tudo", "caixa"):
+            resultados["caixa"] = Caixa.query.filter(
+                filtros(Caixa.descricao, Caixa.tipo, identificador=Caixa.id)
+            ).order_by(Caixa.id.desc()).limit(30).all()
+
+        if secao in ("tudo", "entradas"):
+            resultados["entradas"] = (EntradaEstoque.query.join(
+                Produto, EntradaEstoque.produto_id == Produto.id
+            ).filter(filtros(
+                Produto.nome, identificador=EntradaEstoque.id
+            )).order_by(EntradaEstoque.id.desc()).limit(30).all())
+
+    total_encontrados = sum(len(itens) for itens in resultados.values())
+    return pagina("""
+<h1>🔎 Pesquisa no sistema</h1>
+<p>Pesquise pelo nome do cliente, nome do produto, telefone ou número da
+venda. Consulte também fiados, compras de estoque e movimentos do caixa,
+inclusive anteriores ao último zeramento.</p>
+{% if not termo %}
+<p class="aviso">Digite um termo na barra de pesquisa acima e selecione a seção.</p>
+{% else %}
+<p>Resultado da busca por <strong>{{ termo }}</strong>:
+{{ total_encontrados }} registro(s) exibido(s).
+A consulta mostra até 30 resultados por seção. Use o filtro de seção
+para refinar a pesquisa.</p>
+{% if not total_encontrados %}
+<p class="aviso">Nenhum registro encontrado. Confira o nome ou o número informado.</p>
+{% endif %}
+
+{% if secao in ("tudo", "produtos") and resultados.produtos %}
+<h2>Produtos ({{ resultados.produtos|length }})</h2>
+{% for produto in resultados.produtos %}
+<div class="pesquisa-resultado">
+<a href="{{ url_for('produtos') }}#produto-{{ produto.id }}">{{ produto.nome }}</a>
+<small>Categoria: {{ produto.categoria or 'Sem categoria' }} ·
+Compra: {{ produto.custo|dinheiro }} · Venda: {{ produto.preco|dinheiro }} ·
+Estoque: {{ produto.estoque|quantidade_legivel }} {{ produto.unidade }}</small>
+</div>
+{% endfor %}
+{% endif %}
+
+{% if secao in ("tudo", "clientes") and resultados.clientes %}
+<h2>Clientes ({{ resultados.clientes|length }})</h2>
+{% for cliente in resultados.clientes %}
+<div class="pesquisa-resultado">
+<a href="{{ url_for('clientes') }}#cliente-{{ cliente.id }}">{{ cliente.nome }}</a>
+<small>Cliente #{{ cliente.id }} · Telefone: {{ cliente.telefone or 'Não informado' }}</small>
+</div>
+{% endfor %}
+{% endif %}
+
+{% if secao in ("tudo", "vendas") and resultados.vendas %}
+<h2>Vendas ({{ resultados.vendas|length }})</h2>
+{% for venda in resultados.vendas %}
+<div class="pesquisa-resultado">
+<a href="{{ url_for('detalhe_venda', venda_id=venda.id) }}">Venda #{{ venda.id }}</a>
+— {{ venda.cliente.nome if venda.cliente else 'Sem cliente' }} ·
+{{ venda.produto.nome }}
+<small>{{ (venda.data|data_local).strftime('%d/%m/%Y %H:%M') }} ·
+{{ venda.total|dinheiro }} · {{ 'Fiado' if venda.tipo == 'fiado' else 'À vista' }}</small>
+</div>
+{% endfor %}
+{% endif %}
+
+{% if secao in ("tudo", "fiados") and resultados.fiados %}
+<h2>Fiados ({{ resultados.fiados|length }})</h2>
+{% for venda in resultados.fiados %}
+<div class="pesquisa-resultado">
+<a href="{{ url_for('detalhe_venda', venda_id=venda.id) }}">Fiado #{{ venda.id }}</a>
+— {{ venda.cliente.nome if venda.cliente else 'Sem cliente' }} ·
+{{ venda.produto.nome }}
+<small>Total: {{ venda.total|dinheiro }} · Pago: {{ venda.pago|dinheiro }} ·
+Pendente: {{ venda.saldo_devedor|dinheiro }}
+{% if venda.saldo_devedor == 0 %}· Quitado{% endif %}</small>
+</div>
+{% endfor %}
+{% endif %}
+
+{% if secao in ("tudo", "caixa") and resultados.caixa %}
+<h2>Caixa ({{ resultados.caixa|length }})</h2>
+{% for movimento in resultados.caixa %}
+<div class="pesquisa-resultado">
+<strong>{{ movimento.descricao }}</strong>
+<small>#{{ movimento.id }} ·
+{{ (movimento.data|data_local).strftime('%d/%m/%Y %H:%M') }} ·
+{{ 'Entrada' if movimento.tipo == 'entrada' else 'Saída' }} ·
+{{ movimento.valor|dinheiro }}</small>
+</div>
+{% endfor %}
+{% endif %}
+
+{% if secao in ("tudo", "entradas") and resultados.entradas %}
+<h2>Entradas de mercadoria ({{ resultados.entradas|length }})</h2>
+{% for item in resultados.entradas %}
+<div class="pesquisa-resultado">
+<strong>{{ item.produto.nome }}</strong>
+<small>Entrada #{{ item.id }} ·
+{{ (item.data|data_local).strftime('%d/%m/%Y %H:%M') }} ·
+Quantidade: {{ item.quantidade|quantidade_legivel }} {{ item.produto.unidade }} ·
+Custo na compra: {{ item.custo_unitario|dinheiro }}</small>
+</div>
+{% endfor %}
+{% endif %}
+{% endif %}
+<p><a href="/">Voltar ao painel</a></p>
+""", termo=termo, secao=secao, resultados=resultados,
+       total_encontrados=total_encontrados)
+
+
+@app.route("/vendas/<int:venda_id>")
+def detalhe_venda(venda_id):
+    """Consulta read-only para localizar vendas antigas pela pesquisa."""
+    if not logado():
+        return redirect("/login")
+    venda = vendas_validas().filter(Venda.id == venda_id).first_or_404()
+    return pagina("""
+<h1>Venda #{{ venda.id }}</h1>
+<div class="pesquisa-resultado">
+<p><strong>Cliente:</strong> {{ venda.cliente.nome if venda.cliente else 'Sem cliente' }}</p>
+<p><strong>Data:</strong> {{ (venda.data|data_local).strftime('%d/%m/%Y %H:%M') }}</p>
+<p><strong>Produto:</strong> {{ venda.produto.nome }}</p>
+<p><strong>Quantidade:</strong> {{ venda.quantidade|quantidade_legivel }} {{ venda.produto.unidade }}</p>
+<p><strong>Preço unitário:</strong> {{ venda.preco_unitario|dinheiro }}</p>
+<p><strong>Total da venda:</strong> {{ venda.total|dinheiro }}</p>
+<p><strong>Lucro bruto registrado:</strong> {{ venda.lucro|dinheiro }}</p>
+<p><strong>Tipo:</strong> {{ 'Fiado' if venda.tipo == 'fiado' else 'À vista' }}</p>
+<p><strong>Pago:</strong> {{ venda.pago|dinheiro }}</p>
+{% if venda.tipo == 'fiado' %}
+<p><strong>A receber:</strong> {{ venda.saldo_devedor|dinheiro }}</p>
+{% endif %}
+</div>
+<p><a href="/pesquisa">Nova pesquisa</a> · <a href="/vendas">Ver vendas</a></p>
+""", venda=venda)
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -628,7 +911,7 @@ def painel():
 <table>
 <tr><th>Produto</th><th>Estoque</th></tr>
 {% for produto in baixos %}
-<tr>
+<tr id="produto-{{ produto.id }}">
 <td>{{ produto.nome }}</td>
 <td>{{ produto.estoque }} {{ produto.unidade }}</td>
 </tr>
@@ -969,7 +1252,7 @@ def clientes():
 <table>
 <tr><th>Nome</th><th>Telefone</th></tr>
 {% for cliente in clientes %}
-<tr>
+<tr id="cliente-{{ cliente.id }}">
 <td>{{ cliente.nome }}</td>
 <td>{{ cliente.telefone }}</td>
 </tr>

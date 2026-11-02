@@ -10,7 +10,7 @@ os.environ["ADMIN_USER"] = "auditor"
 os.environ["ADMIN_PASSWORD"] = "senha-testes"
 
 from werkzeug.datastructures import MultiDict
-from app import app, db, Produto, Cliente, Venda, VendaGrupo, Caixa
+from app import app, db, Produto, Cliente, Venda, VendaGrupo, Caixa, EntradaEstoque
 
 
 class AuditoriaFinanceiraTest(unittest.TestCase):
@@ -173,6 +173,77 @@ class AuditoriaFinanceiraTest(unittest.TestCase):
                 sum((v.total for v in Venda.query.all()), Decimal("0")),
                 valor_antes,
             )
+
+    def test_pesquisa_global_aparece_nas_telas_e_requer_login(self):
+        visitante = app.test_client()
+        self.assertIn("/login", visitante.get("/pesquisa?q=feijao").location)
+        self.assertNotIn('<form class="pesquisa-global"', visitante.get("/login").get_data(as_text=True))
+        for pagina_url in ("/", "/produtos", "/clientes", "/entrada", "/venda",
+                           "/vendas", "/fiado", "/caixa", "/relatorios",
+                           "/auditoria-financeira", "/auditoria-fiado"):
+            resposta = self.web.get(pagina_url)
+            self.assertEqual(resposta.status_code, 200, pagina_url)
+            html = resposta.get_data(as_text=True)
+            self.assertIn('class="pesquisa-global"', html, pagina_url)
+            self.assertIn('action="/pesquisa"', html, pagina_url)
+            self.assertIn('Filtrar nesta tabela', html, pagina_url)
+
+    def test_busca_encontra_produto_cliente_fiado_venda_caixa_e_entrada(self):
+        self.web.post("/venda", data=self.venda_form("fiado", "50.00"))
+        with app.app_context():
+            ids = [v.id for v in Venda.query.order_by(Venda.id).all()]
+            caixa = Caixa.query.first()
+            caixa.descricao = "Pagamento de teste"
+            entrada = EntradaEstoque(
+                produto_id=self.ids[0], quantidade=Decimal("2"),
+                custo_unitario=Decimal("70.00")
+            )
+            db.session.add(entrada)
+            db.session.commit()
+            entrada_id = entrada.id
+
+        casos = (
+            ("/pesquisa?q=Feij%C3%A3o&secao=produtos", "Feijão 50 kg"),
+            ("/pesquisa?q=Cliente+Teste&secao=clientes", "Cliente Teste"),
+            ("/pesquisa?q=Cliente+Teste&secao=vendas", "Venda #"),
+            ("/pesquisa?q=Cliente+Teste&secao=fiados", "Fiado #"),
+            ("/pesquisa?q=Pagamento+de+teste&secao=caixa", "Pagamento de teste"),
+            ("/pesquisa?q=Feij%C3%A3o&secao=entradas", "Entrada #"),
+        )
+        for url, esperado in casos:
+            resposta = self.web.get(url)
+            self.assertEqual(resposta.status_code, 200, url)
+            self.assertIn(esperado, resposta.get_data(as_text=True), url)
+
+        numero = self.web.get("/pesquisa?q=%23" + str(ids[0]) + "&secao=vendas")
+        self.assertIn("Venda #" + str(ids[0]), numero.get_data(as_text=True))
+        detalhe = self.web.get("/vendas/" + str(ids[0]))
+        self.assertEqual(detalhe.status_code, 200)
+        self.assertIn("A receber", detalhe.get_data(as_text=True))
+        self.assertIn("Entrada #" + str(entrada_id),
+                      self.web.get("/pesquisa?q=%23" + str(entrada_id)
+                                   + "&secao=entradas").get_data(as_text=True))
+        self.assertEqual(self.web.get("/pesquisa").status_code, 200)
+
+    def test_pesquisa_nao_mostra_venda_excluida_e_escapa_html(self):
+        from app import ExclusaoVenda
+        self.web.post("/venda", data=self.venda_form("fiado", "0.00"))
+        with app.app_context():
+            venda = Venda.query.first()
+            db.session.add(ExclusaoVenda(venda_id=venda.id))
+            id_excluido = venda.id
+            db.session.commit()
+        resultado = self.web.get(
+            "/pesquisa?q=%23" + str(id_excluido) + "&secao=vendas"
+        ).get_data(as_text=True)
+        self.assertIn("Nenhum registro encontrado", resultado)
+        self.assertEqual(
+            self.web.get("/vendas/" + str(id_excluido)).status_code, 404
+        )
+        injetado = self.web.get("/pesquisa?q=%3Cscript%3Ealert(1)%3C%2Fscript%3E")
+        html = injetado.get_data(as_text=True)
+        self.assertNotIn("<script>alert(1)</script>", html)
+        self.assertIn("&lt;script&gt;", html)
 
     def test_rejeitar_movimento_invalido(self):
         resp = self.web.post("/caixa", data={

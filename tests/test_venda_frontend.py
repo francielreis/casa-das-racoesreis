@@ -27,7 +27,14 @@ class TelaVendaTest(unittest.TestCase):
             ))
             db.session.commit()
         self.client = app.test_client()
-        self.client.post("/login", data={"usuario": "auditor", "senha": "senha-testes"})
+        login_html = self.client.get("/login").get_data(as_text=True)
+        token = re.search(r'name="_csrf_token" value="([^"]+)"', login_html)
+        self.assertIsNotNone(token)
+        login = self.client.post("/login", data={
+            "usuario": "auditor", "senha": "senha-testes",
+            "_csrf_token": token.group(1)
+        })
+        self.assertEqual(login.status_code, 302)
 
     def rendered_javascript(self):
         resposta = self.client.get("/venda")

@@ -41,8 +41,14 @@ class TelaVendaTest(unittest.TestCase):
         self.assertIn('data-produto-id="1"', html)
         self.assertIn('value="1" selected', html)
         scripts = re.findall(r"<script[^>]*>(.*?)</script>", html, re.S)
-        self.assertTrue(scripts)
-        return scripts[-1]
+        # Outras telas podem carregar scripts globais após o formulário.
+        # O teste precisa executar especificamente o script da venda.
+        venda_scripts = [
+            script for script in scripts
+            if 'form-venda' in script and 'subtotal-item' in script
+        ]
+        self.assertTrue(venda_scripts)
+        return venda_scripts[-1]
 
     @unittest.skipUnless(shutil.which("node"), "Node.js indisponível")
     def test_javascript_renderizado_sem_erro_de_sintaxe(self):

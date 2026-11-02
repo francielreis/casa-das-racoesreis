@@ -1777,6 +1777,7 @@ def fiado():
 
     return pagina("""
 <h1>Contas fiado</h1>
+<p><a href="/auditoria-fiado"><strong>Ver auditoria detalhada dos fiados por cliente</strong></a></p>
 <div class="tabela">
 <table>
 <tr>
@@ -1810,6 +1811,227 @@ def fiado():
 </table>
 </div>
 """, vendas=vendas)
+
+
+
+@app.route("/auditoria-fiado")
+def auditoria_fiado():
+    """Conferencia de fiados por cliente. Somente leitura, inclusive na exportacao."""
+    if not logado():
+        return redirect("/login")
+
+    import csv
+    from io import StringIO
+
+    vendas = vendas_validas().filter(Venda.tipo == "fiado").order_by(Venda.id.desc()).all()
+    limite_venda = db.session.query(
+        db.func.max(FechamentoCaixa.ultima_venda_id)
+    ).scalar() or 0
+    grupo_por_venda = {
+        vinculo.venda_id: vinculo.grupo_id
+        for vinculo in VendaGrupoItem.query.all()
+    }
+    clientes_por_id = {}
+    alertas = []
+    fiado_antigo = Decimal("0")
+    fiado_atual = Decimal("0")
+    total_fiado = Decimal("0")
+    total_pago = Decimal("0")
+
+    for venda in vendas:
+        total = Decimal(venda.total or 0)
+        pago = Decimal(venda.pago or 0)
+        saldo = venda.saldo_devedor
+        total_fiado += total
+        total_pago += pago
+        if venda.id <= limite_venda:
+            fiado_antigo += saldo
+        else:
+            fiado_atual += saldo
+        if venda.cliente_id not in clientes_por_id:
+            clientes_por_id[venda.cliente_id] = {
+                "id": venda.cliente_id,
+                "nome": venda.cliente.nome if venda.cliente else "SEM CLIENTE",
+                "total": Decimal("0"),
+                "pago": Decimal("0"),
+                "saldo": Decimal("0"),
+                "compras": set(),
+                "itens": [],
+            }
+        cliente = clientes_por_id[venda.cliente_id]
+        cliente["total"] += total
+        cliente["pago"] += pago
+        cliente["saldo"] += saldo
+        grupo_id = grupo_por_venda.get(venda.id)
+        cliente["compras"].add(
+            ("grupo", grupo_id) if grupo_id is not None else ("venda", venda.id)
+        )
+        cliente["itens"].append(venda)
+        if venda.cliente_id is None and saldo > 0:
+            alertas.append(
+                "Venda fiada #" + str(venda.id) + " tem saldo pendente sem cliente cadastrado."
+            )
+        if total < 0 or pago < 0 or pago > total:
+            alertas.append(
+                "Venda #" + str(venda.id) + ": total ou pagamento fora dos limites."
+            )
+
+    # Recibos gravados no caixa: confirmam os pagamentos posteriores ao pedido.
+    recibos_por_venda = {}
+    for movimento in Caixa.query.filter(Caixa.tipo == "entrada").all():
+        descricao = movimento.descricao or ""
+        prefixo = "Pagamento de fiado - Venda #"
+        if not descricao.startswith(prefixo):
+            continue
+        try:
+            venda_id = int(descricao[len(prefixo):])
+        except ValueError:
+            alertas.append("Recibo de fiado com identificacao invalida no caixa #" + str(movimento.id))
+            continue
+        recibos_por_venda.setdefault(venda_id, []).append(movimento)
+
+    todas_vendas = {v.id: v for v in Venda.query.all()}
+    excluidas = {ex.venda_id for ex in ExclusaoVenda.query.all()}
+    for venda_id, recibos in recibos_por_venda.items():
+        if venda_id not in todas_vendas:
+            alertas.append("Recebimento no caixa para venda inexistente #" + str(venda_id))
+        elif venda_id in excluidas:
+            alertas.append("Venda excluida #" + str(venda_id) + " tem recebimento: conferir estorno.")
+        for i, anterior in enumerate(recibos):
+            for seguinte in recibos[i + 1:]:
+                if (
+                    Decimal(anterior.valor or 0) == Decimal(seguinte.valor or 0)
+                    and abs((anterior.data - seguinte.data).total_seconds()) <= 120
+                ):
+                    alertas.append(
+                        "Conferir possivel recebimento repetido da venda #"
+                        + str(venda_id) + " nos movimentos #"
+                        + str(anterior.id) + " e #" + str(seguinte.id)
+                    )
+
+    vinculos_por_grupo = {}
+    for venda_id, grupo_id in grupo_por_venda.items():
+        vinculos_por_grupo.setdefault(grupo_id, []).append(venda_id)
+    for grupo in VendaGrupo.query.filter(VendaGrupo.tipo == "fiado").all():
+        ids = vinculos_por_grupo.get(grupo.id, [])
+        if not ids or any(i in excluidas for i in ids):
+            continue  # Pedido com exclusao requer conferencia na auditoria financeira geral.
+        itens = [todas_vendas[i] for i in ids if i in todas_vendas]
+        if len(itens) != len(ids):
+            alertas.append("Compra #" + str(grupo.id) + ": faltam itens vinculados.")
+            continue
+        pago_itens = sum((Decimal(v.pago or 0) for v in itens), Decimal("0"))
+        pago_inicial = Decimal(grupo.pago or 0)
+        recebido_depois = sum((
+            Decimal(m.valor or 0)
+            for v in itens
+            for m in recibos_por_venda.get(v.id, [])
+        ), Decimal("0"))
+        if abs(pago_itens - pago_inicial - recebido_depois) > Decimal("0.01"):
+            alertas.append(
+                "Compra #" + str(grupo.id)
+                + ": pagamentos das vendas nao conciliam com entrada inicial e recibos."
+            )
+
+    clientes = sorted(
+        clientes_por_id.values(),
+        key=lambda c: (-c["saldo"], c["nome"].casefold(), c["id"] or 0)
+    )
+    por_nome = {}
+    for cliente in clientes:
+        chave = cliente["nome"].strip().casefold()
+        if cliente["id"] is not None and chave:
+            por_nome.setdefault(chave, set()).add(cliente["id"])
+    for nome, ids in por_nome.items():
+        if len(ids) > 1:
+            alertas.append(
+                "Nome de cliente cadastrado em " + str(len(ids))
+                + " registros diferentes (" + nome + "). Conferir se e a mesma pessoa."
+            )
+
+    if request.args.get("formato") == "csv":
+        arquivo = StringIO()
+        escritor = csv.writer(arquivo, delimiter=";")
+        escritor.writerow([
+            "Venda ID", "Compra ID", "Data", "Cliente ID", "Cliente", "Produto",
+            "Total (R$)", "Pago (R$)", "Saldo (R$)", "Periodo"
+        ])
+        for venda in vendas:
+            escritor.writerow([
+                venda.id, grupo_por_venda.get(venda.id, ""),
+                data_local(venda.data).strftime("%d/%m/%Y %H:%M"),
+                venda.cliente_id or "",
+                venda.cliente.nome if venda.cliente else "SEM CLIENTE",
+                venda.produto.nome if venda.produto else "Produto nao encontrado",
+                str(venda.total or 0), str(venda.pago or 0),
+                str(venda.saldo_devedor),
+                "Anterior ao zeramento" if venda.id <= limite_venda else "Apos zeramento",
+            ])
+        return Response(
+            "\ufeff" + arquivo.getvalue(),
+            content_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": "attachment; filename=auditoria-fiado.csv",
+                "Cache-Control": "no-store",
+            }
+        )
+
+    devedores = sum(1 for cliente in clientes if cliente["saldo"] > 0)
+    return pagina("""
+<h1>Auditoria detalhada do fiado</h1>
+<p>Conferencia somente leitura com todos os fiados ainda existentes no banco,
+mesmo de caixas anteriores. Nenhuma venda ou pagamento sera alterado.</p>
+<p><a href="/auditoria-fiado?formato=csv">Baixar planilha CSV de todos os fiados</a>
+ · <a href="/auditoria-financeira">Ver auditoria financeira geral</a></p>
+<div class="cards">
+<div class="card"><h3>Fiado a receber</h3><div class="valor">{{ (antigo + novo)|dinheiro }}</div></div>
+<div class="card"><h3>Clientes devedores</h3><div class="valor">{{ devedores }}</div></div>
+<div class="card"><h3>Fiado anterior ao ultimo zeramento</h3><div class="valor">{{ antigo|dinheiro }}</div></div>
+<div class="card"><h3>Fiado desde ultimo zeramento</h3><div class="valor">{{ novo|dinheiro }}</div></div>
+<div class="card"><h3>Total historico de vendas fiadas validas</h3><div class="valor">{{ total|dinheiro }}</div></div>
+<div class="card"><h3>Total ja pago nessas vendas</h3><div class="valor">{{ pago|dinheiro }}</div></div>
+</div>
+<h2>Conferencia por cliente</h2>
+<p>Abra o nome de cada cliente para conferir os itens das vendas,
+os pagamentos registrados e o saldo devedor.</p>
+<div class="tabela"><table>
+<tr><th>Cliente</th><th>Compras</th><th>Vendido fiado</th><th>Pago</th><th>Deve</th></tr>
+{% for c in clientes %}
+<tr>
+<td><details><summary><strong>{{ c.nome }}</strong> (ID {{ c.id or "sem cadastro" }})</summary>
+<ul>
+{% for v in c.itens %}
+<li>#{{ v.id }} · {{ (v.data|data_local).strftime("%d/%m/%Y") }}
+· {{ v.produto.nome if v.produto else "Produto indisponivel" }}
+· {{ v.total|dinheiro }} comprado / {{ v.pago|dinheiro }} pago
+/ <strong>{{ v.saldo_devedor|dinheiro }} pendente</strong></li>
+{% endfor %}
+</ul></details></td>
+<td>{{ c.compras|length }}</td>
+<td>{{ c.total|dinheiro }}</td>
+<td>{{ c.pago|dinheiro }}</td>
+<td><strong>{{ c.saldo|dinheiro }}</strong></td>
+</tr>
+{% else %}
+<tr><td colspan="5">Nenhuma venda fiada encontrada.</td></tr>
+{% endfor %}
+</table></div>
+<h2>Alertas para conferir ({{ alertas|length }})</h2>
+<p>Os alertas sao suspeitas e nao comprovam fraude ou erro. Os pagamentos
+devem ser confrontados com recibos e comprovantes.</p>
+{% if alertas %}
+<div class="tabela"><table><tr><th>Ponto a conferir</th></tr>
+{% for alerta in alertas %}
+<tr><td>{{ alerta }}</td></tr>
+{% endfor %}</table></div>
+{% else %}
+<p>Nenhum alerta detectado por estas verificacoes automaticas.</p>
+{% endif %}
+<p><strong>Limitacao:</strong> o sistema nao registra a data de vencimento
+dos fiados nem possui um livro separado de pagamentos por cliente. A
+confirmacao final depende dos comprovantes e do historico de recebimentos.</p>
+""", clientes=clientes, antigo=fiado_antigo, novo=fiado_atual,
+        total=total_fiado, pago=total_pago, devedores=devedores, alertas=alertas)
 
 
 @app.route("/receber/<int:venda_id>", methods=["POST"])

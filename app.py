@@ -2112,44 +2112,136 @@ def fiado():
         Venda.tipo == "fiado"
     ).order_by(Venda.id.desc()).all()
 
-    return pagina("""
-<h1>Contas fiado</h1>
-<p><a href="/auditoria-fiado"><strong>Ver auditoria detalhada dos fiados por cliente</strong></a> · <a href="/auditoria-fiado?formato=pdf"><strong>Baixar PDF</strong></a></p>
-<div class="tabela">
-<table>
-<tr>
-<th>Cliente</th>
-<th>Produto</th>
-<th>Total</th>
-<th>Pago</th>
-<th>Falta pagar</th>
-<th>Receber</th>
-</tr>
-{% for venda in vendas %}
-<tr>
-<td>{{ venda.cliente.nome if venda.cliente else "Sem cliente" }}</td>
-<td>{{ venda.produto.nome }}</td>
-<td>{{ venda.total|dinheiro }}</td>
-<td>{{ venda.pago|dinheiro }}</td>
-<td>{{ venda.saldo_devedor|dinheiro }}</td>
-<td>
-{% if venda.saldo_devedor > 0 %}
-<form method="post" action="/receber/{{ venda.id }}">
-<input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
-<input name="valor" type="number" step="0.01"
-       placeholder="Valor recebido" required>
-<button>Receber</button>
-</form>
-{% else %}
-✅ Pago
-{% endif %}
-</td>
-</tr>
-{% endfor %}
-</table>
-</div>
-""", vendas=vendas)
+    # Agrupa somente na apresentação. Cada venda mantém seu ID, saldo e
+    # recebimento próprios; clientes homônimos não têm dívidas misturadas.
+    por_cliente = {}
+    for venda in vendas:
+        chave = venda.cliente_id if venda.cliente_id is not None else ("sem_cliente", venda.id)
+        if chave not in por_cliente:
+            por_cliente[chave] = {
+                "nome": venda.cliente.nome if venda.cliente else "Sem cliente",
+                "vendas": [],
+                "total": Decimal("0"),
+                "pago": Decimal("0"),
+                "saldo": Decimal("0"),
+            }
+        grupo = por_cliente[chave]
+        grupo["vendas"].append(venda)
+        grupo["total"] += Decimal(venda.total or 0)
+        grupo["pago"] += Decimal(venda.pago or 0)
+        grupo["saldo"] += venda.saldo_devedor
 
+    grupos = list(por_cliente.values())
+    total_geral = sum((g["total"] for g in grupos), Decimal("0"))
+    pago_geral = sum((g["pago"] for g in grupos), Decimal("0"))
+    saldo_geral = sum((g["saldo"] for g in grupos), Decimal("0"))
+
+    return pagina("""
+<style>
+.fiado-resumo,.fiado-balanco{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.fiado-indicador{background:#f7faf8;border:1px solid #dce9df;border-radius:10px;padding:12px;min-width:0}
+.fiado-indicador small{display:block;color:#53645b;font-size:12px;margin-bottom:5px}
+.fiado-indicador strong{display:block;font-size:17px;overflow-wrap:anywhere}
+.fiado-devedor strong{color:#ae2631}
+.fiado-pesquisa{margin:18px 0}
+.fiado-pesquisa label{display:block;font-weight:600;margin-bottom:7px}
+.fiado-pesquisa input{width:100%;max-width:100%;padding:12px;border:1px solid #cbd7cf;border-radius:9px;font:inherit}
+.fiado-pesquisa small{display:block;margin-top:6px;color:#58665e}
+.fiado-cartao{background:#fff;border:1px solid #dfe6e1;border-radius:14px;margin:16px 0;overflow:hidden;box-shadow:0 2px 7px #00000009}
+.fiado-cabecalho{padding:15px;background:#eef7f0;border-bottom:1px solid #dfe6e1;display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap}
+.fiado-cabecalho h2{font-size:20px;margin:0;color:#176b3a}
+.fiado-cabecalho small{color:#52655a}
+.fiado-balanco{padding:12px}
+.fiado-produto{border-top:1px solid #e9eeea;padding:12px 15px;display:grid;grid-template-columns:minmax(0,1.7fr) repeat(3,minmax(0,1fr));gap:10px;align-items:start}
+.fiado-produto:first-child{border-top:1px solid #dfe6e1}
+.fiado-produto-nome strong{display:block;overflow-wrap:anywhere}
+.fiado-produto-nome small{color:#68756d;font-size:12px}
+.fiado-valor small{display:block;color:#68756d;font-size:12px;margin-bottom:4px}
+.fiado-valor strong{overflow-wrap:anywhere}
+.fiado-pagamento{grid-column:1/-1;display:flex;gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap}
+.fiado-pagamento input{width:180px;max-width:100%;padding:10px}
+.fiado-pagamento button{margin:0}
+.fiado-quitado{color:#176b3a;font-weight:700}
+@media(max-width:640px){
+  .fiado-resumo,.fiado-balanco{grid-template-columns:1fr 1fr;gap:7px}
+  .fiado-resumo .fiado-devedor,.fiado-balanco .fiado-devedor{grid-column:1/-1}
+  .fiado-indicador{padding:10px}
+  .fiado-produto{grid-template-columns:1fr 1fr;gap:12px}
+  .fiado-produto-nome{grid-column:1/-1}
+  .fiado-pagamento{justify-content:stretch}
+  .fiado-pagamento input{flex:1;min-width:0}
+}
+</style>
+<h1>Contas fiado</h1>
+<p><a href="/auditoria-fiado"><strong>Ver auditoria detalhada dos fiados por cliente</strong></a>
+ · <a href="/auditoria-fiado?formato=pdf"><strong>Baixar PDF</strong></a></p>
+<div class="fiado-resumo">
+  <div class="fiado-indicador"><small>Total das compras</small><strong>{{ total_geral|dinheiro }}</strong></div>
+  <div class="fiado-indicador"><small>Total recebido</small><strong>{{ pago_geral|dinheiro }}</strong></div>
+  <div class="fiado-indicador fiado-devedor"><small>Total a receber</small><strong>{{ saldo_geral|dinheiro }}</strong></div>
+</div>
+<div class="fiado-pesquisa">
+  <label for="buscar-fiado">🔎 Buscar cliente ou produto</label>
+  <input id="buscar-fiado" type="search" placeholder="Digite o nome do cliente ou produto..." autocomplete="off">
+  <small id="fiado-quantidade" aria-live="polite">{{ grupos|length }} cliente(s) visível(is)</small>
+</div>
+{% for grupo in grupos %}
+<article class="fiado-cartao" data-fiado-cartao>
+  <div class="fiado-cabecalho">
+    <h2>{{ grupo.nome }}</h2>
+    <small>{{ grupo.vendas|length }} compra(s)</small>
+  </div>
+  <div class="fiado-balanco">
+    <div class="fiado-indicador"><small>Total</small><strong>{{ grupo.total|dinheiro }}</strong></div>
+    <div class="fiado-indicador"><small>Pago</small><strong>{{ grupo.pago|dinheiro }}</strong></div>
+    <div class="fiado-indicador fiado-devedor"><small>Falta pagar</small><strong>{{ grupo.saldo|dinheiro }}</strong></div>
+  </div>
+  <div class="fiado-itens">
+    {% for venda in grupo.vendas %}
+    <div class="fiado-produto">
+      <div class="fiado-produto-nome"><strong>{{ venda.produto.nome }}</strong><small>Venda #{{ venda.id }}</small></div>
+      <div class="fiado-valor"><small>Valor</small><strong>{{ venda.total|dinheiro }}</strong></div>
+      <div class="fiado-valor"><small>Pago</small><strong>{{ venda.pago|dinheiro }}</strong></div>
+      <div class="fiado-valor"><small>Falta pagar</small><strong>{{ venda.saldo_devedor|dinheiro }}</strong></div>
+      <div class="fiado-pagamento">
+        {% if venda.saldo_devedor > 0 %}
+        <form method="post" action="/receber/{{ venda.id }}">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+          <input aria-label="Valor recebido da venda {{ venda.id }}" name="valor" type="number"
+                 min="0.01" step="0.01" max="{{ venda.saldo_devedor }}" placeholder="Valor recebido" required>
+          <button type="submit">Receber</button>
+        </form>
+        {% else %}
+        <span class="fiado-quitado">✅ Pago</span>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</article>
+{% else %}
+<p>Não há vendas fiadas registradas.</p>
+{% endfor %}
+<script>
+(function () {
+  const busca = document.getElementById("buscar-fiado");
+  const cartoes = Array.from(document.querySelectorAll("[data-fiado-cartao]"));
+  const contador = document.getElementById("fiado-quantidade");
+  const normalizar = texto => (texto || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  busca.addEventListener("input", function () {
+    const termo = normalizar(busca.value.trim());
+    let visiveis = 0;
+    cartoes.forEach(function (cartao) {
+      const mostrar = !termo || normalizar(cartao.textContent).includes(termo);
+      cartao.hidden = !mostrar;
+      if (mostrar) visiveis++;
+    });
+    contador.textContent = visiveis + " de " + cartoes.length + " cliente(s) visível(is)";
+  });
+})();
+</script>
+""", grupos=grupos, total_geral=total_geral,
+       pago_geral=pago_geral, saldo_geral=saldo_geral)
 
 
 @app.route("/auditoria-fiado")

@@ -113,6 +113,37 @@ class AuditoriaFinanceiraTest(unittest.TestCase):
             self.assertEqual(Caixa.query.count(), count)
             self.assertEqual(db.session.get(Venda, vid).pago, Decimal("50.00"))
 
+    def test_fiados_pendentes_e_recebidos_em_tabelas_separadas(self):
+        self.web.post("/venda", data=self.venda_form("fiado", "0"))
+        with app.app_context():
+            vendas = Venda.query.order_by(Venda.id).all()
+            self.assertEqual(len(vendas), 2)
+            venda_quitada, venda_parcial = vendas
+            venda_quitada.pago = Decimal(venda_quitada.total)
+            venda_parcial.pago = Decimal("20.00")
+            id_quitado, id_parcial = venda_quitada.id, venda_parcial.id
+            db.session.commit()
+            antes = [(v.id, v.total, v.pago) for v in Venda.query.order_by(Venda.id).all()]
+
+        resposta = self.web.get("/fiado")
+        self.assertEqual(resposta.status_code, 200)
+        html = resposta.get_data(as_text=True)
+        parte_pendente = html.split('<section class="fiado-secao" id="fiados-a-receber">', 1)[1].split(
+            '<section class="fiado-secao" id="fiados-recebidos">', 1)[0]
+        parte_recebida = html.split('<section class="fiado-secao" id="fiados-recebidos">', 1)[1]
+        self.assertIn("Cliente Teste", parte_pendente)
+        self.assertNotIn('action="/receber/' + str(id_quitado) + '"', parte_pendente)
+        self.assertIn('action="/receber/' + str(id_parcial) + '"', parte_pendente)
+        self.assertIn('Venda #' + str(id_quitado), parte_recebida)
+        self.assertIn('Venda #' + str(id_parcial), parte_recebida)
+        self.assertIn("Quitado", parte_recebida)
+        self.assertIn("Parcial", parte_recebida)
+        self.assertIn("Total recebido", html)
+        self.assertIn("Total a receber", html)
+        with app.app_context():
+            depois = [(v.id, v.total, v.pago) for v in Venda.query.order_by(Venda.id).all()]
+        self.assertEqual(antes, depois)
+
     def test_pdf_auditoria_fiado_com_acesso_restrito_e_sem_alterar_dados(self):
         sem_login = app.test_client().get("/auditoria-fiado?formato=pdf")
         self.assertEqual(sem_login.status_code, 302)

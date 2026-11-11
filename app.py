@@ -2114,8 +2114,16 @@ def fiado():
 
     # Agrupa somente na apresentação. Cada venda mantém seu ID, saldo e
     # recebimento próprios; clientes homônimos não têm dívidas misturadas.
+    # Fiados com saldo positivo ficam em "A receber". Qualquer valor já
+    # pago (inclusive parcial/entrada) aparece na tabela "Recebidos".
+    # Uma venda parcialmente paga pode aparecer nas duas seções; os totais
+    # mostram valores diferentes e não são somados duas vezes.
+    recebidos = [v for v in vendas if Decimal(v.pago or 0) > 0]
+    pendentes = [v for v in vendas if v.saldo_devedor > 0]
+    quitados = sum(1 for v in vendas if v.saldo_devedor <= 0)
+
     por_cliente = {}
-    for venda in vendas:
+    for venda in pendentes:
         chave = venda.cliente_id if venda.cliente_id is not None else ("sem_cliente", venda.id)
         if chave not in por_cliente:
             por_cliente[chave] = {
@@ -2132,9 +2140,9 @@ def fiado():
         grupo["saldo"] += venda.saldo_devedor
 
     grupos = list(por_cliente.values())
-    total_geral = sum((g["total"] for g in grupos), Decimal("0"))
-    pago_geral = sum((g["pago"] for g in grupos), Decimal("0"))
-    saldo_geral = sum((g["saldo"] for g in grupos), Decimal("0"))
+    total_geral = sum((Decimal(v.total or 0) for v in vendas), Decimal("0"))
+    pago_geral = sum((Decimal(v.pago or 0) for v in vendas), Decimal("0"))
+    saldo_geral = sum((v.saldo_devedor for v in vendas), Decimal("0"))
 
     return pagina("""
 <style>
@@ -2162,6 +2170,28 @@ def fiado():
 .fiado-pagamento input{width:180px;max-width:100%;padding:10px}
 .fiado-pagamento button{margin:0}
 .fiado-quitado{color:#176b3a;font-weight:700}
+.fiado-secao{margin-top:24px}
+.fiado-secao h2{font-size:20px;margin:0 0 7px}
+.fiado-secao p{color:#59675e;margin:5px 0 12px}
+.fiado-recebido{color:#176b3a;font-weight:700}
+.fiado-table-wrapper{background:#fff;border:1px solid #dfe6e1;border-radius:14px;overflow-x:auto}
+.fiado-table-wrapper table{width:100%;border-collapse:collapse}
+.fiado-table-wrapper th,.fiado-table-wrapper td{padding:13px;text-align:left;border-bottom:1px solid #e7ebe8;vertical-align:middle;overflow-wrap:anywhere}
+.fiado-table-wrapper th{background:#eef7f0}
+.fiado-table-wrapper td strong{display:block}
+.fiado-table-wrapper td small{color:#647268}
+.fiado-status{font-weight:700;color:#176b3a}
+.fiado-status-parcial{color:#a66b00}
+.fiado-tabela-vazia{padding:16px}
+@media(max-width:640px){
+  .fiado-table-wrapper table,.fiado-table-wrapper tbody,.fiado-table-wrapper tr,.fiado-table-wrapper td{display:block;width:100%}
+  .fiado-table-wrapper thead{display:none}
+  .fiado-table-wrapper tr{padding:9px 12px;border-bottom:1px solid #dfe6e1}
+  .fiado-table-wrapper td{display:flex;justify-content:space-between;gap:10px;padding:7px 3px;border:0;text-align:right}
+  .fiado-table-wrapper td::before{content:attr(data-label);font-weight:bold;color:#5b6d61;text-align:left}
+  .fiado-table-wrapper td.fiado-tabela-vazia{display:block;text-align:left}
+  .fiado-table-wrapper td.fiado-tabela-vazia::before{display:none}
+}
 @media(max-width:640px){
   .fiado-resumo,.fiado-balanco{grid-template-columns:1fr 1fr;gap:7px}
   .fiado-resumo .fiado-devedor,.fiado-balanco .fiado-devedor{grid-column:1/-1}
@@ -2183,8 +2213,11 @@ def fiado():
 <div class="fiado-pesquisa">
   <label for="buscar-fiado">🔎 Buscar cliente ou produto</label>
   <input id="buscar-fiado" type="search" placeholder="Digite o nome do cliente ou produto..." autocomplete="off">
-  <small id="fiado-quantidade" aria-live="polite">{{ grupos|length }} cliente(s) visível(is)</small>
+  <small id="fiado-quantidade" aria-live="polite">{{ grupos|length }} cliente(s) a receber · {{ recebidos|length }} venda(s) com recebimento</small>
 </div>
+<section class="fiado-secao" id="fiados-a-receber">
+<h2>🔴 Fiados a receber</h2>
+<p>Clientes que ainda devem. Pagamentos parciais já são descontados do saldo.</p>
 {% for grupo in grupos %}
 <article class="fiado-cartao" data-fiado-cartao>
   <div class="fiado-cabecalho">
@@ -2220,12 +2253,41 @@ def fiado():
   </div>
 </article>
 {% else %}
-<p>Não há vendas fiadas registradas.</p>
+<p>Não há fiados pendentes.</p>
 {% endfor %}
+</section>
+<section class="fiado-secao" id="fiados-recebidos">
+<h2>🟢 Fiados recebidos</h2>
+<p>Pagamentos registrados, inclusive parciais. {{ quitados }} venda(s) totalmente quitada(s). Uma compra parcialmente paga também aparece em “A receber” pelo valor restante.</p>
+<div class="fiado-table-wrapper"><table>
+<thead><tr><th>Cliente</th><th>Produto</th><th>Valor da compra</th><th>Recebido</th><th>Falta pagar</th><th>Status</th></tr></thead>
+<tbody>
+{% for venda in recebidos %}
+<tr data-fiado-recebido>
+  <td data-label="Cliente">{{ venda.cliente.nome if venda.cliente else "Sem cliente" }}</td>
+  <td data-label="Produto"><strong>{{ venda.produto.nome }}</strong><small>Venda #{{ venda.id }}</small></td>
+  <td data-label="Total">{{ venda.total|dinheiro }}</td>
+  <td data-label="Recebido" class="fiado-recebido">{{ venda.pago|dinheiro }}</td>
+  <td data-label="Falta pagar">{{ venda.saldo_devedor|dinheiro }}</td>
+  <td data-label="Situação">
+    {% if venda.saldo_devedor > 0 %}
+    <span class="fiado-status fiado-status-parcial">Parcial</span>
+    {% else %}
+    <span class="fiado-status">✅ Quitado</span>
+    {% endif %}
+  </td>
+</tr>
+{% else %}
+<tr><td colspan="6" class="fiado-tabela-vazia">Nenhum pagamento de fiado registrado.</td></tr>
+{% endfor %}
+</tbody>
+</table></div>
+</section>
 <script>
 (function () {
   const busca = document.getElementById("buscar-fiado");
   const cartoes = Array.from(document.querySelectorAll("[data-fiado-cartao]"));
+  const recebidos = Array.from(document.querySelectorAll("[data-fiado-recebido]"));
   const contador = document.getElementById("fiado-quantidade");
   const normalizar = texto => (texto || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
   busca.addEventListener("input", function () {
@@ -2236,12 +2298,19 @@ def fiado():
       cartao.hidden = !mostrar;
       if (mostrar) visiveis++;
     });
-    contador.textContent = visiveis + " de " + cartoes.length + " cliente(s) visível(is)";
+    let recebimentosVisiveis = 0;
+    recebidos.forEach(function (linha) {
+      const mostrar = !termo || normalizar(linha.textContent).includes(termo);
+      linha.hidden = !mostrar;
+      if (mostrar) recebimentosVisiveis++;
+    });
+    contador.textContent = visiveis + " de " + cartoes.length + " cliente(s) a receber · "
+      + recebimentosVisiveis + " de " + recebidos.length + " venda(s) com recebimento";
   });
 })();
 </script>
-""", grupos=grupos, total_geral=total_geral,
-       pago_geral=pago_geral, saldo_geral=saldo_geral)
+""", grupos=grupos, recebidos=recebidos, quitados=quitados,
+       total_geral=total_geral, pago_geral=pago_geral, saldo_geral=saldo_geral)
 
 
 @app.route("/auditoria-fiado")

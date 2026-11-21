@@ -2200,6 +2200,7 @@ def fiado():
         if chave not in por_cliente:
             por_cliente[chave] = {
                 "nome": venda.cliente.nome if venda.cliente else "Sem cliente",
+                "cliente_id": venda.cliente_id,
                 "vendas": [],
                 "total": Decimal("0"),
                 "pago": Decimal("0"),
@@ -2240,8 +2241,13 @@ def fiado():
 .fiado-valor small{display:block;color:#68756d;font-size:12px;margin-bottom:4px}
 .fiado-valor strong{overflow-wrap:anywhere}
 .fiado-pagamento{grid-column:1/-1;display:flex;gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap}
-.fiado-pagamento input{width:180px;max-width:100%;padding:10px}
-.fiado-pagamento button{margin:0}
+.fiado-pagamento form{width:100%;display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}
+.fiado-pagamento input{width:180px;max-width:100%;min-width:130px;flex:1 1 160px;padding:10px}
+.fiado-pagamento button{margin:0;white-space:nowrap}
+.fiado-pagamento .fiado-total{background:#eaf5ed;color:#176b3a;border:1px solid #9fc8ab}
+.fiado-cliente-quitar{padding:0 12px 14px;display:flex;align-items:center;justify-content:flex-end;gap:10px;flex-wrap:wrap}
+.fiado-cliente-quitar button{background:#176b3a;margin:0}
+.fiado-cliente-quitar small{color:#53645b}
 .fiado-quitado{color:#176b3a;font-weight:700}
 .fiado-secao{margin-top:24px}
 .fiado-secao h2{font-size:20px;margin:0 0 7px}
@@ -2272,7 +2278,11 @@ def fiado():
   .fiado-produto{grid-template-columns:1fr 1fr;gap:12px}
   .fiado-produto-nome{grid-column:1/-1}
   .fiado-pagamento{justify-content:stretch}
-  .fiado-pagamento input{flex:1;min-width:0}
+  .fiado-pagamento form{justify-content:stretch}
+  .fiado-pagamento input{flex:1 1 100%;min-width:0}
+  .fiado-pagamento button{flex:1}
+  .fiado-cliente-quitar{justify-content:stretch}
+  .fiado-cliente-quitar form,.fiado-cliente-quitar button{width:100%}
 }
 </style>
 <h1>Contas fiado</h1>
@@ -2306,6 +2316,17 @@ O total recebido abaixo é o histórico acumulado, não o caixa atual.</p>
     <div class="fiado-indicador"><small>Pago</small><strong>{{ grupo.pago|dinheiro }}</strong></div>
     <div class="fiado-indicador fiado-devedor"><small>Falta pagar</small><strong>{{ grupo.saldo|dinheiro }}</strong></div>
   </div>
+  {% if grupo.cliente_id and grupo.saldo > 0 %}
+  <div class="fiado-cliente-quitar">
+    <small>Quitar todas as compras pendentes deste cliente de uma vez</small>
+    <form method="post" action="{{ url_for('receber_cliente', cliente_id=grupo.cliente_id) }}"
+          onsubmit="return confirm('Confirmar recebimento total de {{ grupo.saldo|dinheiro }} deste cliente?')">
+      <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="saldo_conferido" value="{{ grupo.saldo }}">
+      <button type="submit">Receber total do cliente — {{ grupo.saldo|dinheiro }}</button>
+    </form>
+  </div>
+  {% endif %}
   <div class="fiado-itens">
     {% for venda in grupo.vendas %}
     <div class="fiado-produto">
@@ -2317,9 +2338,13 @@ O total recebido abaixo é o histórico acumulado, não o caixa atual.</p>
         {% if venda.saldo_devedor > 0 %}
         <form method="post" action="/receber/{{ venda.id }}">
           <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+          <input type="hidden" name="saldo_conferido" value="{{ venda.saldo_devedor }}">
           <input aria-label="Valor recebido da venda {{ venda.id }}" name="valor" type="number"
-                 min="0.01" step="0.01" max="{{ venda.saldo_devedor }}" placeholder="Valor recebido" required>
-          <button type="submit">Receber</button>
+                 min="0.01" step="0.01" max="{{ venda.saldo_devedor }}" placeholder="Valor parcial recebido" required>
+          <button type="submit" name="modo" value="parcial">Receber parcial</button>
+          <button type="submit" name="modo" value="total" formnovalidate
+                  class="fiado-total"
+                  onclick="return confirm('Confirmar recebimento total de {{ venda.saldo_devedor|dinheiro }} desta compra?')">Receber total</button>
         </form>
         {% else %}
         <span class="fiado-quitado">✅ Pago</span>
@@ -2635,30 +2660,101 @@ def receber(venda_id):
     if not logado():
         return redirect("/login")
 
+    # Garante que um pagamento parcial e um pagamento integral nao se dupliquem.
     venda = Venda.query.filter_by(id=venda_id).with_for_update().first_or_404()
     if db.session.get(ExclusaoVenda, venda_id):
         flash("Esta venda foi excluída e não pode receber pagamentos.", "erro")
         return redirect("/fiado")
-    valor = numero(request.form["valor"])
+
+    saldo = venda.saldo_devedor
+    if saldo <= 0:
+        flash("Esta compra já está quitada. Nenhum valor foi cobrado.", "erro")
+        return redirect("/fiado")
+
+    modo = request.form.get("modo", "parcial")
+    if modo == "total":
+        # Conferencia contra tela desatualizada ou clique repetido.
+        saldo_conferido = numero(request.form.get("saldo_conferido", ""))
+        if not valor_monetario_valido(saldo_conferido) or saldo_conferido != saldo:
+            flash("O saldo da compra mudou. Confira o valor antes de receber.", "erro")
+            return redirect("/fiado")
+        valor = saldo
+    elif modo == "parcial":
+        valor = numero(request.form.get("valor", ""))
+    else:
+        flash("Tipo de recebimento inválido.", "erro")
+        return redirect("/fiado")
 
     if not valor_monetario_valido(valor):
         flash("Informe um pagamento positivo, com até 2 casas decimais.", "erro")
         return redirect("/fiado")
-
-    saldo = venda.saldo_devedor
     if valor > saldo:
         flash("Pagamento superior ao saldo devedor. Confira o valor.", "erro")
         return redirect("/fiado")
 
     venda.pago = Decimal(venda.pago or 0) + valor
-
     db.session.add(Caixa(
         tipo="entrada",
         descricao="Pagamento de fiado - Venda #" + str(venda.id),
         valor=valor
     ))
     db.session.commit()
-    flash("Pagamento recebido.", "sucesso")
+    flash("Pagamento recebido: " + dinheiro(valor) + ".", "sucesso")
+    return redirect("/fiado")
+
+
+@app.route("/receber-cliente/<int:cliente_id>", methods=["POST"])
+def receber_cliente(cliente_id):
+    """Quita todos os fiados pendentes de um cliente numa unica transacao."""
+    if not logado():
+        return redirect("/login")
+    cliente = db.session.get(Cliente, cliente_id)
+    if cliente is None:
+        return ("Cliente não encontrado.", 404)
+
+    # Bloqueia as vendas por ID para impedir pagamentos concorrentes duplicados.
+    vendas = vendas_validas().filter(
+        Venda.tipo == "fiado", Venda.cliente_id == cliente_id
+    ).order_by(Venda.id.asc()).with_for_update().all()
+    pendentes = [
+        venda for venda in vendas
+        if venda.saldo_devedor > 0
+        and db.session.get(ExclusaoVenda, venda.id) is None
+    ]
+    total_pendente = sum(
+        (venda.saldo_devedor for venda in pendentes), Decimal("0")
+    )
+    if total_pendente <= 0:
+        flash("Este cliente não possui fiados pendentes.", "erro")
+        return redirect("/fiado")
+
+    saldo_conferido = numero(request.form.get("saldo_conferido", ""))
+    if (not valor_monetario_valido(saldo_conferido)
+            or saldo_conferido != total_pendente):
+        flash("O saldo do cliente mudou. Confira as compras antes de receber.", "erro")
+        return redirect("/fiado")
+
+    try:
+        for venda in pendentes:
+            valor = venda.saldo_devedor
+            venda.pago = Decimal(venda.pago or 0) + valor
+            db.session.add(Caixa(
+                tipo="entrada",
+                descricao="Pagamento de fiado - Venda #" + str(venda.id),
+                valor=valor
+            ))
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        app.logger.exception("Falha ao quitar fiado do cliente %s", cliente_id)
+        flash("Não foi possível registrar a quitação. Nenhum pagamento foi salvo.", "erro")
+        return redirect("/fiado")
+
+    flash(
+        "Fiados de " + cliente.nome + " quitados. Recebido: "
+        + dinheiro(total_pendente) + ".",
+        "sucesso"
+    )
     return redirect("/fiado")
 
 

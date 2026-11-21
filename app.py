@@ -201,6 +201,15 @@ class FechamentoCaixa(db.Model):
     data = db.Column(db.DateTime, nullable=False, default=agora_utc)
 
 
+class FechamentoFiado(db.Model):
+    # Zera somente a contagem dos recebimentos, sem alterar dividas ou caixa.
+    id = db.Column(db.Integer, primary_key=True)
+    ultimo_movimento_id = db.Column(db.Integer, nullable=False, default=0)
+    total_recebido = db.Column(db.Numeric(12, 2), nullable=False, default=0)
+    total_estornado = db.Column(db.Numeric(12, 2), nullable=False, default=0)
+    data = db.Column(db.DateTime, nullable=False, default=agora_utc)
+
+
 def vendas_atuais():
     limite = db.session.query(
         db.func.max(FechamentoCaixa.ultima_venda_id)
@@ -213,6 +222,69 @@ def movimentos_atuais():
         db.func.max(FechamentoCaixa.ultimo_movimento_id)
     ).scalar() or 0
     return Caixa.query.filter(Caixa.id > limite)
+
+
+def resumo_caixa_fiado():
+    """Conta recebimentos de fiado desde o fechamento especifico mais recente.
+
+    Inclui entrada no ato da compra e pagamentos posteriores, descontando
+    estornos de vendas fiadas. Nao modifica o saldo devedor dos clientes.
+    O fechamento do caixa geral nao interfere nesta contagem.
+    """
+    limite = db.session.query(
+        db.func.max(FechamentoFiado.ultimo_movimento_id)
+    ).scalar() or 0
+    movimentos = Caixa.query.filter(Caixa.id > limite).all()
+    grupos_fiados = {
+        grupo_id for (grupo_id,) in db.session.query(VendaGrupo.id)
+        .filter(VendaGrupo.tipo == "fiado").all()
+    }
+    vendas_fiadas = {
+        venda_id for (venda_id,) in db.session.query(Venda.id)
+        .filter(Venda.tipo == "fiado").all()
+    }
+    recebido = Decimal("0")
+    estornado = Decimal("0")
+
+    for movimento in movimentos:
+        descricao = movimento.descricao or ""
+        valor = Decimal(movimento.valor or 0)
+
+        if movimento.tipo == "entrada":
+            prefixo_pagamento = "Pagamento de fiado - Venda #"
+            prefixo_compra = "Compra #"
+            if descricao.startswith(prefixo_pagamento):
+                try:
+                    venda_id = int(descricao[len(prefixo_pagamento):])
+                except ValueError:
+                    continue
+                if venda_id in vendas_fiadas:
+                    recebido += valor
+            elif descricao.startswith(prefixo_compra):
+                try:
+                    grupo_id = int(
+                        descricao[len(prefixo_compra):].split(" - ", 1)[0]
+                    )
+                except ValueError:
+                    continue
+                if grupo_id in grupos_fiados:
+                    recebido += valor
+
+        elif movimento.tipo == "saida":
+            prefixo_estorno = "Estorno por exclusão da venda #"
+            if descricao.startswith(prefixo_estorno):
+                try:
+                    venda_id = int(descricao[len(prefixo_estorno):])
+                except ValueError:
+                    continue
+                if venda_id in vendas_fiadas:
+                    estornado += valor
+
+    return {
+        "recebido": recebido,
+        "estornado": estornado,
+        "liquido": recebido - estornado
+    }
 
 
 def eh_compra_de_mercadoria(movimento):
@@ -2143,6 +2215,7 @@ def fiado():
     total_geral = sum((Decimal(v.total or 0) for v in vendas), Decimal("0"))
     pago_geral = sum((Decimal(v.pago or 0) for v in vendas), Decimal("0"))
     saldo_geral = sum((v.saldo_devedor for v in vendas), Decimal("0"))
+    caixa_fiado = resumo_caixa_fiado()
 
     return pagina("""
 <style>
@@ -2204,7 +2277,11 @@ def fiado():
 </style>
 <h1>Contas fiado</h1>
 <p><a href="/auditoria-fiado"><strong>Ver auditoria detalhada dos fiados por cliente</strong></a>
- · <a href="/auditoria-fiado?formato=pdf"><strong>Baixar PDF</strong></a></p>
+ · <a href="/auditoria-fiado?formato=pdf"><strong>Baixar PDF</strong></a>
+ · <a href="/zerar-caixa-fiado"><strong>Zerar caixa do fiado</strong></a></p>
+<p><strong>Recebido no caixa do fiado desde o último zeramento:</strong>
+{{ caixa_fiado.liquido|dinheiro }} (recebimentos menos estornos).
+O total recebido abaixo é o histórico acumulado, não o caixa atual.</p>
 <div class="fiado-resumo">
   <div class="fiado-indicador"><small>Total das compras</small><strong>{{ total_geral|dinheiro }}</strong></div>
   <div class="fiado-indicador"><small>Total recebido</small><strong>{{ pago_geral|dinheiro }}</strong></div>
@@ -2310,7 +2387,8 @@ def fiado():
 })();
 </script>
 """, grupos=grupos, recebidos=recebidos, quitados=quitados,
-       total_geral=total_geral, pago_geral=pago_geral, saldo_geral=saldo_geral)
+       total_geral=total_geral, pago_geral=pago_geral, saldo_geral=saldo_geral,
+       caixa_fiado=caixa_fiado)
 
 
 @app.route("/auditoria-fiado")
@@ -2642,6 +2720,7 @@ def caixa():
     movimentos = movimentos_atuais().order_by(
         Caixa.id.desc()
     ).limit(100).all()
+    caixa_fiado = resumo_caixa_fiado()
 
     return pagina("""
 <h1>Caixa</h1>
@@ -2674,6 +2753,27 @@ def caixa():
 <div class="valor despesa">{{ outras_saidas|dinheiro }}</div>
 </div>
 </div>
+
+<h2>Caixa do fiado (contagem independente)</h2>
+<p>Pagamentos de vendas fiadas registrados desde o último zeramento deste
+controle, incluindo entradas pagas na compra. Os valores também integram o
+caixa geral: <strong>não some os dois caixas</strong>.</p>
+<div class="cards">
+<div class="card">
+<h3>Fiado recebido</h3>
+<div class="valor">{{ caixa_fiado.recebido|dinheiro }}</div>
+</div>
+<div class="card">
+<h3>Estornos de fiado</h3>
+<div class="valor despesa">{{ caixa_fiado.estornado|dinheiro }}</div>
+</div>
+<div class="card">
+<h3>Saldo líquido do fiado</h3>
+<div class="valor">{{ caixa_fiado.liquido|dinheiro }}</div>
+</div>
+</div>
+<p><a href="/zerar-caixa-fiado"><strong>Zerar caixa do fiado</strong></a>
+ · <a href="/fiado">Consultar dívidas dos clientes</a></p>
 
 <br>
 <div class="formulario">
@@ -2715,7 +2815,8 @@ def caixa():
         saidas=saidas,
         compras=compras,
         despesas_da_loja=despesas_da_loja,
-        outras_saidas=outras_saidas
+        outras_saidas=outras_saidas,
+        caixa_fiado=caixa_fiado
     )
 
 
@@ -2836,6 +2937,80 @@ Para consultar períodos anteriores, acesse <a href="/relatorios">Relatórios</a
 <p><a href="/caixa">Ver todo o movimento do caixa</a></p>
 """, total=total, despesas=lista, categorias=CATEGORIAS_DESPESAS,
         token=session["csrf_despesas"])
+
+
+@app.route("/zerar-caixa-fiado", methods=["GET", "POST"])
+def zerar_caixa_fiado():
+    if not logado():
+        return redirect("/login")
+
+    if request.method == "POST":
+        recebido = request.form.get("csrf_zerar_fiado", "")
+        esperado = session.get("csrf_zerar_fiado", "")
+        if not esperado or not hmac.compare_digest(recebido, esperado):
+            flash("A sessão do formulário expirou. Tente novamente.", "erro")
+            return redirect("/zerar-caixa-fiado")
+        if request.form.get("confirmar") != "sim":
+            flash("Confirme para zerar a contagem de recebimentos de fiado.", "erro")
+            return redirect("/zerar-caixa-fiado")
+
+        resumo = resumo_caixa_fiado()
+        ultimo_id = db.session.query(db.func.max(Caixa.id)).scalar() or 0
+        db.session.add(FechamentoFiado(
+            ultimo_movimento_id=ultimo_id,
+            total_recebido=resumo["recebido"],
+            total_estornado=resumo["estornado"]
+        ))
+        db.session.commit()
+        session.pop("csrf_zerar_fiado", None)
+        flash(
+            "Caixa do fiado zerado. Dívidas, pagamentos, histórico e caixa geral mantidos.",
+            "sucesso"
+        )
+        return redirect("/caixa")
+
+    if "csrf_zerar_fiado" not in session:
+        session["csrf_zerar_fiado"] = secrets.token_urlsafe(32)
+
+    resumo = resumo_caixa_fiado()
+    fechamentos = FechamentoFiado.query.order_by(
+        FechamentoFiado.id.desc()
+    ).limit(10).all()
+    return pagina("""
+<h1>Zerar caixa do fiado</h1>
+<div class="formulario">
+<p><strong>Saldo líquido da contagem atual:</strong>
+{{ resumo.liquido|dinheiro }}.</p>
+<p>Esta operação reinicia apenas os valores de recebimento do fiado exibidos
+no caixa. <strong>Não quita, apaga ou altera dívidas dos clientes.</strong>
+Também não apaga pagamentos, vendas, movimentações ou relatórios e não
+zera o caixa geral.</p>
+<form method="post">
+<input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+<input type="hidden" name="csrf_zerar_fiado" value="{{ token }}">
+<label><input style="width:auto" type="checkbox" name="confirmar"
+value="sim" required> Confirmo que desejo iniciar uma nova contagem de recebimentos de fiado.</label>
+<br><br>
+<button type="submit">Zerar caixa do fiado</button>
+<a href="/caixa">Cancelar</a>
+</form>
+</div>
+{% if fechamentos %}
+<h2>Últimos zeramentos do fiado</h2>
+<div class="tabela"><table>
+<tr><th>Data</th><th>Recebido</th><th>Estornado</th><th>Saldo líquido</th></tr>
+{% for fechamento in fechamentos %}
+<tr>
+<td>{{ (fechamento.data|data_local).strftime("%d/%m/%Y %H:%M") }}</td>
+<td>{{ fechamento.total_recebido|dinheiro }}</td>
+<td>{{ fechamento.total_estornado|dinheiro }}</td>
+<td>{{ (fechamento.total_recebido - fechamento.total_estornado)|dinheiro }}</td>
+</tr>
+{% endfor %}
+</table></div>
+{% endif %}
+""", resumo=resumo, fechamentos=fechamentos,
+       token=session["csrf_zerar_fiado"])
 
 
 @app.route("/zerar-caixa", methods=["GET", "POST"])

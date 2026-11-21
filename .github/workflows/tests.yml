@@ -1,0 +1,23 @@
+name: Validar sistema de caixa
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  testes:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Baixar código
+        uses: actions/checkout@v4
+      - name: Preparar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+      - name: Verificar sintaxe
+        run: python -m compileall -q app.py
+      - name: Rodar testes do caixa do fiado
+        run: python -m unittest discover -s tests -v
